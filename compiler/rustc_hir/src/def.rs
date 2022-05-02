@@ -1,4 +1,4 @@
-use crate::def_id::{DefId, CRATE_DEF_INDEX, LOCAL_CRATE};
+use crate::def_id::DefId;
 use crate::hir;
 
 use rustc_ast as ast;
@@ -124,9 +124,7 @@ impl DefKind {
     pub fn descr(self, def_id: DefId) -> &'static str {
         match self {
             DefKind::Fn => "function",
-            DefKind::Mod if def_id.index == CRATE_DEF_INDEX && def_id.krate != LOCAL_CRATE => {
-                "crate"
-            }
+            DefKind::Mod if def_id.is_crate_root() && !def_id.is_local() => "crate",
             DefKind::Mod => "module",
             DefKind::Static(..) => "static",
             DefKind::Enum => "enum",
@@ -221,6 +219,14 @@ impl DefKind {
             | DefKind::ForeignMod
             | DefKind::GlobalAsm
             | DefKind::Impl => None,
+        }
+    }
+
+    #[inline]
+    pub fn is_fn_like(self) -> bool {
+        match self {
+            DefKind::Fn | DefKind::AssocFn | DefKind::Closure | DefKind::Generator => true,
+            _ => false,
         }
     }
 }

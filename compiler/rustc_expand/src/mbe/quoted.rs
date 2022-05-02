@@ -1,9 +1,8 @@
 use crate::mbe::macro_parser::count_metavar_decls;
 use crate::mbe::{Delimited, KleeneOp, KleeneToken, MetaVarExpr, SequenceRepetition, TokenTree};
 
-use rustc_ast::token::{self, Token};
-use rustc_ast::tokenstream;
-use rustc_ast::{NodeId, DUMMY_NODE_ID};
+use rustc_ast::token::{self, Delimiter, Token};
+use rustc_ast::{tokenstream, NodeId};
 use rustc_ast_pretty::pprust;
 use rustc_feature::Features;
 use rustc_session::parse::{feature_err, ParseSess};
@@ -11,8 +10,6 @@ use rustc_span::symbol::{kw, sym, Ident};
 
 use rustc_span::edition::Edition;
 use rustc_span::{Span, SyntaxContext};
-
-use rustc_data_structures::sync::Lrc;
 
 const VALID_FRAGMENT_NAMES_MSG: &str = "valid fragment specifiers are \
                                         `ident`, `block`, `stmt`, `expr`, `pat`, `ty`, `lifetime`, \
@@ -104,10 +101,7 @@ pub(super) fn parse(
                     }
                     tree => tree.as_ref().map_or(start_sp, tokenstream::TokenTree::span),
                 };
-                if node_id != DUMMY_NODE_ID {
-                    // Macros loaded from other crates have dummy node ids.
-                    sess.missing_fragment_specifiers.borrow_mut().insert(span, node_id);
-                }
+
                 result.push(TokenTree::MetaVarDecl(span, ident, None));
             }
 
@@ -153,11 +147,11 @@ fn parse_tree(
     match tree {
         // `tree` is a `$` token. Look at the next token in `trees`
         tokenstream::TokenTree::Token(Token { kind: token::Dollar, span }) => {
-            // FIXME: Handle `None`-delimited groups in a more systematic way
+            // FIXME: Handle `Invisible`-delimited groups in a more systematic way
             // during parsing.
             let mut next = outer_trees.next();
             let mut trees: Box<dyn Iterator<Item = tokenstream::TokenTree>>;
-            if let Some(tokenstream::TokenTree::Delimited(_, token::NoDelim, tts)) = next {
+            if let Some(tokenstream::TokenTree::Delimited(_, Delimiter::Invisible, tts)) = next {
                 trees = Box::new(tts.into_trees());
                 next = trees.next();
             } else {
@@ -168,7 +162,7 @@ fn parse_tree(
                 // `tree` is followed by a delimited set of token trees.
                 Some(tokenstream::TokenTree::Delimited(delim_span, delim, tts)) => {
                     if parsing_patterns {
-                        if delim != token::Paren {
+                        if delim != Delimiter::Parenthesis {
                             span_dollar_dollar_or_metavar_in_the_lhs_err(
                                 sess,
                                 &Token { kind: token::OpenDelim(delim), span: delim_span.entire() },
@@ -176,7 +170,7 @@ fn parse_tree(
                         }
                     } else {
                         match delim {
-                            token::Brace => {
+                            Delimiter::Brace => {
                                 // The delimiter is `{`.  This indicates the beginning
                                 // of a meta-variable expression (e.g. `${count(ident)}`).
                                 // Try to parse the meta-variable expression.
@@ -197,7 +191,7 @@ fn parse_tree(
                                     }
                                 }
                             }
-                            token::Paren => {}
+                            Delimiter::Parenthesis => {}
                             _ => {
                                 let tok = pprust::token_kind_to_string(&token::OpenDelim(delim));
                                 let msg = format!("expected `(` or `{{`, found `{}`", tok);
@@ -217,12 +211,7 @@ fn parse_tree(
                         if parsing_patterns { count_metavar_decls(&sequence) } else { 0 };
                     TokenTree::Sequence(
                         delim_span,
-                        Lrc::new(SequenceRepetition {
-                            tts: sequence,
-                            separator,
-                            kleene,
-                            num_captures,
-                        }),
+                        SequenceRepetition { tts: sequence, separator, kleene, num_captures },
                     )
                 }
 
@@ -273,10 +262,10 @@ fn parse_tree(
         // descend into the delimited set and further parse it.
         tokenstream::TokenTree::Delimited(span, delim, tts) => TokenTree::Delimited(
             span,
-            Lrc::new(Delimited {
+            Delimited {
                 delim,
                 tts: parse(tts, parsing_patterns, sess, node_id, features, edition),
-            }),
+            },
         ),
     }
 }

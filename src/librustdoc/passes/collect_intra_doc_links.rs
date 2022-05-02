@@ -3,6 +3,7 @@
 //! [RFC 1946]: https://github.com/rust-lang/rfcs/blob/master/text/1946-intra-rustdoc-links.md
 
 use pulldown_cmark::LinkType;
+use rustc_ast::util::comments::may_have_doc_links;
 use rustc_data_structures::{fx::FxHashMap, intern::Interned, stable_set::FxHashSet};
 use rustc_errors::{Applicability, Diagnostic};
 use rustc_hir::def::Namespace::*;
@@ -11,6 +12,7 @@ use rustc_hir::def_id::{DefId, CRATE_DEF_ID};
 use rustc_hir::Mutability;
 use rustc_middle::ty::{DefIdTree, Ty, TyCtxt};
 use rustc_middle::{bug, span_bug, ty};
+use rustc_resolve::ParentScope;
 use rustc_session::lint::Lint;
 use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{sym, Ident, Symbol};
@@ -159,7 +161,7 @@ impl TryFrom<ResolveRes> for Res {
 }
 
 /// A link failed to resolve.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum ResolutionFailure<'a> {
     /// This resolved, but with the wrong namespace.
     WrongNamespace {
@@ -199,7 +201,7 @@ enum ResolutionFailure<'a> {
     Dummy,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum MalformedGenerics {
     /// This link has unbalanced angle brackets.
     ///
@@ -252,6 +254,7 @@ impl ResolutionFailure<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
 enum AnchorFailure {
     /// User error: `[std#x#y]` is not valid
     MultipleAnchors,
@@ -331,7 +334,7 @@ impl ItemFragment {
                     FragmentKind::StructField => write!(s, "structfield.{}", name),
                     FragmentKind::Variant => write!(s, "variant.{}", name),
                     FragmentKind::VariantField => {
-                        let variant = tcx.item_name(tcx.parent(def_id).unwrap());
+                        let variant = tcx.item_name(tcx.parent(def_id));
                         write!(s, "variant.{}.field.{}", variant, name)
                     }
                 }
@@ -506,10 +509,10 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
                 | DefKind::AssocTy
                 | DefKind::Variant
                 | DefKind::Field) => {
-                    let parent_def_id = tcx.parent(def_id).expect("nested item has no parent");
+                    let parent_def_id = tcx.parent(def_id);
                     if def_kind == DefKind::Field && tcx.def_kind(parent_def_id) == DefKind::Variant
                     {
-                        tcx.parent(parent_def_id).expect("variant has no parent")
+                        tcx.parent(parent_def_id)
                     } else {
                         parent_def_id
                     }
@@ -556,7 +559,17 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
         // Resolver doesn't know about true, false, and types that aren't paths (e.g. `()`).
         let result = self
             .cx
-            .enter_resolver(|resolver| resolver.resolve_rustdoc_path(path_str, ns, module_id))
+            .resolver_caches
+            .doc_link_resolutions
+            .get(&(Symbol::intern(path_str), ns, module_id))
+            .copied()
+            .unwrap_or_else(|| {
+                self.cx.enter_resolver(|resolver| {
+                    let parent_scope =
+                        ParentScope::module(resolver.expect_module(module_id), resolver);
+                    resolver.resolve_rustdoc_path(path_str, ns, parent_scope)
+                })
+            })
             .and_then(|res| res.try_into().ok())
             .or_else(|| resolve_primitive(path_str, ns))
             .or_else(|| self.resolve_macro_rules(path_str, ns));
@@ -1025,37 +1038,50 @@ fn is_derive_trait_collision<T>(ns: &PerNS<Result<(Res, T), ResolutionFailure<'_
 impl<'a, 'tcx> DocVisitor for LinkCollector<'a, 'tcx> {
     fn visit_item(&mut self, item: &Item) {
         let parent_node =
-            item.def_id.as_def_id().and_then(|did| find_nearest_parent_module(self.cx.tcx, did));
+            item.item_id.as_def_id().and_then(|did| find_nearest_parent_module(self.cx.tcx, did));
         if parent_node.is_some() {
-            trace!("got parent node for {:?} {:?}, id {:?}", item.type_(), item.name, item.def_id);
+            trace!("got parent node for {:?} {:?}, id {:?}", item.type_(), item.name, item.item_id);
         }
 
         let inner_docs = item.inner_docs(self.cx.tcx);
 
         if item.is_mod() && inner_docs {
-            self.mod_ids.push(item.def_id.expect_def_id());
+            self.mod_ids.push(item.item_id.expect_def_id());
         }
 
         // We want to resolve in the lexical scope of the documentation.
         // In the presence of re-exports, this is not the same as the module of the item.
         // Rather than merging all documentation into one, resolve it one attribute at a time
         // so we know which module it came from.
-        for (parent_module, doc) in item.attrs.collapsed_doc_value_by_module_level() {
+        for (parent_module, doc) in item.attrs.prepare_to_doc_link_resolution() {
+            if !may_have_doc_links(&doc) {
+                continue;
+            }
             debug!("combined_docs={}", doc);
             // NOTE: if there are links that start in one crate and end in another, this will not resolve them.
             // This is a degenerate case and it's not supported by rustdoc.
             let parent_node = parent_module.or(parent_node);
-            for md_link in markdown_links(&doc) {
+            let mut tmp_links = self
+                .cx
+                .resolver_caches
+                .markdown_links
+                .take()
+                .expect("`markdown_links` are already borrowed");
+            if !tmp_links.contains_key(&doc) {
+                tmp_links.insert(doc.clone(), preprocessed_markdown_links(&doc));
+            }
+            for md_link in &tmp_links[&doc] {
                 let link = self.resolve_link(&item, &doc, parent_node, md_link);
                 if let Some(link) = link {
-                    self.cx.cache.intra_doc_links.entry(item.def_id).or_default().push(link);
+                    self.cx.cache.intra_doc_links.entry(item.item_id).or_default().push(link);
                 }
             }
+            self.cx.resolver_caches.markdown_links = Some(tmp_links);
         }
 
         if item.is_mod() {
             if !inner_docs {
-                self.mod_ids.push(item.def_id.expect_def_id());
+                self.mod_ids.push(item.item_id.expect_def_id());
             }
 
             self.visit_item_recur(item);
@@ -1066,18 +1092,19 @@ impl<'a, 'tcx> DocVisitor for LinkCollector<'a, 'tcx> {
     }
 }
 
-enum PreprocessingError<'a> {
+enum PreprocessingError {
     Anchor(AnchorFailure),
     Disambiguator(Range<usize>, String),
-    Resolution(ResolutionFailure<'a>, String, Option<Disambiguator>),
+    Resolution(ResolutionFailure<'static>, String, Option<Disambiguator>),
 }
 
-impl From<AnchorFailure> for PreprocessingError<'_> {
+impl From<AnchorFailure> for PreprocessingError {
     fn from(err: AnchorFailure) -> Self {
         Self::Anchor(err)
     }
 }
 
+#[derive(Clone)]
 struct PreprocessingInfo {
     path_str: String,
     disambiguator: Option<Disambiguator>,
@@ -1085,15 +1112,18 @@ struct PreprocessingInfo {
     link_text: String,
 }
 
+// Not a typedef to avoid leaking several private structures from this module.
+crate struct PreprocessedMarkdownLink(Result<PreprocessingInfo, PreprocessingError>, MarkdownLink);
+
 /// Returns:
 /// - `None` if the link should be ignored.
 /// - `Some(Err)` if the link should emit an error
 /// - `Some(Ok)` if the link is valid
 ///
 /// `link_buffer` is needed for lifetime reasons; it will always be overwritten and the contents ignored.
-fn preprocess_link<'a>(
-    ori_link: &'a MarkdownLink,
-) -> Option<Result<PreprocessingInfo, PreprocessingError<'a>>> {
+fn preprocess_link(
+    ori_link: &MarkdownLink,
+) -> Option<Result<PreprocessingInfo, PreprocessingError>> {
     // [] is mostly likely not supposed to be a link
     if ori_link.link.is_empty() {
         return None;
@@ -1172,6 +1202,12 @@ fn preprocess_link<'a>(
     }))
 }
 
+fn preprocessed_markdown_links(s: &str) -> Vec<PreprocessedMarkdownLink> {
+    markdown_links(s, |link| {
+        preprocess_link(&link).map(|pp_link| PreprocessedMarkdownLink(pp_link, link))
+    })
+}
+
 impl LinkCollector<'_, '_> {
     /// This is the entry point for resolving an intra-doc link.
     ///
@@ -1181,8 +1217,9 @@ impl LinkCollector<'_, '_> {
         item: &Item,
         dox: &str,
         parent_node: Option<DefId>,
-        ori_link: MarkdownLink,
+        link: &PreprocessedMarkdownLink,
     ) -> Option<ItemLink> {
+        let PreprocessedMarkdownLink(pp_link, ori_link) = link;
         trace!("considering link '{}'", ori_link.link);
 
         let diag_info = DiagnosticInfo {
@@ -1192,28 +1229,29 @@ impl LinkCollector<'_, '_> {
             link_range: ori_link.range.clone(),
         };
 
-        let PreprocessingInfo { ref path_str, disambiguator, extra_fragment, link_text } =
-            match preprocess_link(&ori_link)? {
-                Ok(x) => x,
-                Err(err) => {
-                    match err {
-                        PreprocessingError::Anchor(err) => anchor_failure(self.cx, diag_info, err),
-                        PreprocessingError::Disambiguator(range, msg) => {
-                            disambiguator_error(self.cx, diag_info, range, &msg)
-                        }
-                        PreprocessingError::Resolution(err, path_str, disambiguator) => {
-                            resolution_failure(
-                                self,
-                                diag_info,
-                                &path_str,
-                                disambiguator,
-                                smallvec![err],
-                            );
-                        }
+        let PreprocessingInfo { path_str, disambiguator, extra_fragment, link_text } = match pp_link
+        {
+            Ok(x) => x,
+            Err(err) => {
+                match err {
+                    PreprocessingError::Anchor(err) => anchor_failure(self.cx, diag_info, *err),
+                    PreprocessingError::Disambiguator(range, msg) => {
+                        disambiguator_error(self.cx, diag_info, range.clone(), msg)
                     }
-                    return None;
+                    PreprocessingError::Resolution(err, path_str, disambiguator) => {
+                        resolution_failure(
+                            self,
+                            diag_info,
+                            path_str,
+                            *disambiguator,
+                            smallvec![err.clone()],
+                        );
+                    }
                 }
-            };
+                return None;
+            }
+        };
+        let disambiguator = *disambiguator;
 
         let inner_docs = item.inner_docs(self.cx.tcx);
 
@@ -1246,11 +1284,11 @@ impl LinkCollector<'_, '_> {
 
         let (mut res, fragment) = self.resolve_with_disambiguator_cached(
             ResolutionInfo {
-                item_id: item.def_id,
+                item_id: item.item_id,
                 module_id,
                 dis: disambiguator,
                 path_str: path_str.to_owned(),
-                extra_fragment,
+                extra_fragment: extra_fragment.clone(),
             },
             diag_info.clone(), // this struct should really be Copy, but Range is not :(
             matches!(ori_link.kind, LinkType::Reference | LinkType::Shortcut),
@@ -1302,7 +1340,7 @@ impl LinkCollector<'_, '_> {
                     // FIXME: it would be nice to check that the feature gate was enabled in the original crate, not just ignore it altogether.
                     // However I'm not sure how to check that across crates.
                     if prim == PrimitiveType::RawPointer
-                        && item.def_id.is_local()
+                        && item.item_id.is_local()
                         && !self.cx.tcx.features().intra_doc_pointers
                     {
                         self.report_rawptr_assoc_feature_gate(dox, &ori_link, item);
@@ -1320,8 +1358,8 @@ impl LinkCollector<'_, '_> {
                 }
 
                 Some(ItemLink {
-                    link: ori_link.link,
-                    link_text,
+                    link: ori_link.link.clone(),
+                    link_text: link_text.clone(),
                     did: res.def_id(self.cx.tcx),
                     fragment,
                 })
@@ -1343,7 +1381,12 @@ impl LinkCollector<'_, '_> {
                     &diag_info,
                 )?;
                 let id = clean::register_res(self.cx, rustc_hir::def::Res::Def(kind, id));
-                Some(ItemLink { link: ori_link.link, link_text, did: id, fragment })
+                Some(ItemLink {
+                    link: ori_link.link.clone(),
+                    link_text: link_text.clone(),
+                    did: id,
+                    fragment,
+                })
             }
         }
     }
@@ -1386,7 +1429,7 @@ impl LinkCollector<'_, '_> {
             // The `expect_def_id()` should be okay because `local_def_id_to_hir_id`
             // would presumably panic if a fake `DefIndex` were passed.
             .and_then(|dst_id| {
-                item.def_id.expect_def_id().as_local().map(|src_id| (src_id, dst_id))
+                item.item_id.expect_def_id().as_local().map(|src_id| (src_id, dst_id))
             })
         {
             if self.cx.tcx.privacy_access_levels(()).is_exported(src_id)
@@ -1864,7 +1907,7 @@ fn report_diagnostic(
     DiagnosticInfo { item, ori_link: _, dox, link_range }: &DiagnosticInfo<'_>,
     decorate: impl FnOnce(&mut Diagnostic, Option<rustc_span::Span>),
 ) {
-    let Some(hir_id) = DocContext::as_local_hir_id(tcx, item.def_id)
+    let Some(hir_id) = DocContext::as_local_hir_id(tcx, item.item_id)
     else {
         // If non-local, no need to check anything.
         info!("ignoring warning from parent crate: {}", msg);
@@ -2293,14 +2336,10 @@ fn handle_variant(
     cx: &DocContext<'_>,
     res: Res,
 ) -> Result<(Res, Option<ItemFragment>), ErrorKind<'static>> {
-    cx.tcx
-        .parent(res.def_id(cx.tcx))
-        .map(|parent| {
-            let parent_def = Res::Def(DefKind::Enum, parent);
-            let variant = cx.tcx.expect_variant_res(res.as_hir_res().unwrap());
-            (parent_def, Some(ItemFragment(FragmentKind::Variant, variant.def_id)))
-        })
-        .ok_or_else(|| ResolutionFailure::NoParentItem.into())
+    let parent = cx.tcx.parent(res.def_id(cx.tcx));
+    let parent_def = Res::Def(DefKind::Enum, parent);
+    let variant = cx.tcx.expect_variant_res(res.as_hir_res().unwrap());
+    Ok((parent_def, Some(ItemFragment(FragmentKind::Variant, variant.def_id))))
 }
 
 /// Resolve a primitive type or value.

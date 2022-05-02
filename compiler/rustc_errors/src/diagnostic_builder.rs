@@ -255,19 +255,6 @@ impl EmissionGuarantee for ! {
 /// instead of a `&DiagnosticBuilder<'a>`. This `forward!` macro makes
 /// it easy to declare such methods on the builder.
 macro_rules! forward {
-    // Forward pattern for &self -> &Self
-    (
-        $(#[$attrs:meta])*
-        pub fn $n:ident(&self, $($name:ident: $ty:ty),* $(,)?) -> &Self
-    ) => {
-        $(#[$attrs])*
-        #[doc = concat!("See [`Diagnostic::", stringify!($n), "()`].")]
-        pub fn $n(&self, $($name: $ty),*) -> &Self {
-            self.diagnostic.$n($($name),*);
-            self
-        }
-    };
-
     // Forward pattern for &mut self -> &mut Self
     (
         $(#[$attrs:meta])*
@@ -490,7 +477,7 @@ impl<'a, G: EmissionGuarantee> DiagnosticBuilder<'a, G> {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self);
     forward!(pub fn span_suggestions(
@@ -510,28 +497,28 @@ impl<'a, G: EmissionGuarantee> DiagnosticBuilder<'a, G> {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self);
     forward!(pub fn span_suggestion_verbose(
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self);
     forward!(pub fn span_suggestion_hidden(
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self);
     forward!(pub fn tool_only_span_suggestion(
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self);
 
@@ -542,6 +529,11 @@ impl<'a, G: EmissionGuarantee> DiagnosticBuilder<'a, G> {
         &mut self,
         name: impl Into<Cow<'static, str>>,
         arg: DiagnosticArgValue<'static>,
+    ) -> &mut Self);
+
+    forward!(pub fn subdiagnostic(
+        &mut self,
+        subdiagnostic: impl crate::AddSubdiagnostic
     ) -> &mut Self);
 }
 

@@ -7,6 +7,7 @@
 #![feature(nll)]
 #![feature(associated_type_bounds)]
 #![feature(strict_provenance)]
+#![feature(int_roundings)]
 #![recursion_limit = "256"]
 #![allow(rustc::potential_query_instability)]
 
@@ -28,6 +29,7 @@ use rustc_hir::def_id::CrateNum;
 use rustc_hir::LangItem;
 use rustc_middle::dep_graph::WorkProduct;
 use rustc_middle::middle::dependency_format::Dependencies;
+use rustc_middle::middle::exported_symbols::SymbolExportKind;
 use rustc_middle::ty::query::{ExternProviders, Providers};
 use rustc_serialize::{opaque, Decodable, Decoder, Encoder};
 use rustc_session::config::{CrateType, OutputFilenames, OutputType, RUST_CGU_EXT};
@@ -141,12 +143,13 @@ impl From<&cstore::NativeLib> for NativeLib {
 pub struct CrateInfo {
     pub target_cpu: String,
     pub exported_symbols: FxHashMap<CrateType, Vec<String>>,
+    pub linked_symbols: FxHashMap<CrateType, Vec<(String, SymbolExportKind)>>,
     pub local_crate_name: Symbol,
     pub compiler_builtins: Option<CrateNum>,
     pub profiler_runtime: Option<CrateNum>,
     pub is_no_builtins: FxHashSet<CrateNum>,
     pub native_libraries: FxHashMap<CrateNum, Vec<NativeLib>>,
-    pub crate_name: FxHashMap<CrateNum, String>,
+    pub crate_name: FxHashMap<CrateNum, Symbol>,
     pub used_libraries: Vec<NativeLib>,
     pub used_crate_source: FxHashMap<CrateNum, Lrc<CrateSource>>,
     pub used_crates: Vec<CrateNum>,

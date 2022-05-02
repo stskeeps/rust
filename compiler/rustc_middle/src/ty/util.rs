@@ -18,7 +18,6 @@ use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_macros::HashStable;
-use rustc_query_system::ich::NodeIdHashingMode;
 use rustc_span::{sym, DUMMY_SP};
 use rustc_target::abi::{Integer, Size, TargetDataLayout};
 use smallvec::SmallVec;
@@ -136,21 +135,17 @@ impl<'tcx> TyCtxt<'tcx> {
         // regions, which is desirable too.
         let ty = self.erase_regions(ty);
 
-        hcx.while_hashing_spans(false, |hcx| {
-            hcx.with_node_id_hashing_mode(NodeIdHashingMode::HashDefPath, |hcx| {
-                ty.hash_stable(hcx, &mut hasher);
-            });
-        });
+        hcx.while_hashing_spans(false, |hcx| ty.hash_stable(hcx, &mut hasher));
         hasher.finish()
     }
 
     pub fn res_generics_def_id(self, res: Res) -> Option<DefId> {
         match res {
             Res::Def(DefKind::Ctor(CtorOf::Variant, _), def_id) => {
-                Some(self.parent(def_id).and_then(|def_id| self.parent(def_id)).unwrap())
+                Some(self.parent(self.parent(def_id)))
             }
             Res::Def(DefKind::Variant | DefKind::Ctor(CtorOf::Struct, _), def_id) => {
-                Some(self.parent(def_id).unwrap())
+                Some(self.parent(def_id))
             }
             // Other `DefKind`s don't have generics and would ICE when calling
             // `generics_of`.
@@ -192,7 +187,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// if input `ty` is not a structure at all.
     pub fn struct_tail_without_normalization(self, ty: Ty<'tcx>) -> Ty<'tcx> {
         let tcx = self;
-        tcx.struct_tail_with_normalize(ty, |ty| ty)
+        tcx.struct_tail_with_normalize(ty, |ty| ty, || {})
     }
 
     /// Returns the deeply last field of nested structures, or the same type if
@@ -208,7 +203,7 @@ impl<'tcx> TyCtxt<'tcx> {
         param_env: ty::ParamEnv<'tcx>,
     ) -> Ty<'tcx> {
         let tcx = self;
-        tcx.struct_tail_with_normalize(ty, |ty| tcx.normalize_erasing_regions(param_env, ty))
+        tcx.struct_tail_with_normalize(ty, |ty| tcx.normalize_erasing_regions(param_env, ty), || {})
     }
 
     /// Returns the deeply last field of nested structures, or the same type if
@@ -225,6 +220,10 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         mut ty: Ty<'tcx>,
         mut normalize: impl FnMut(Ty<'tcx>) -> Ty<'tcx>,
+        // This is currently used to allow us to walk a ValTree
+        // in lockstep with the type in order to get the ValTree branch that
+        // corresponds to an unsized field.
+        mut f: impl FnMut() -> (),
     ) -> Ty<'tcx> {
         let recursion_limit = self.recursion_limit();
         for iteration in 0.. {
@@ -240,12 +239,16 @@ impl<'tcx> TyCtxt<'tcx> {
                         break;
                     }
                     match def.non_enum_variant().fields.last() {
-                        Some(f) => ty = f.ty(self, substs),
+                        Some(field) => {
+                            f();
+                            ty = field.ty(self, substs);
+                        }
                         None => break,
                     }
                 }
 
                 ty::Tuple(tys) if let Some((&last_ty, _)) = tys.split_last() => {
+                    f();
                     ty = last_ty;
                 }
 
@@ -497,9 +500,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn typeck_root_def_id(self, def_id: DefId) -> DefId {
         let mut def_id = def_id;
         while self.is_typeck_child(def_id) {
-            def_id = self.parent(def_id).unwrap_or_else(|| {
-                bug!("closure {:?} has no parent", def_id);
-            });
+            def_id = self.parent(def_id);
         }
         def_id
     }

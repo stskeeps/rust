@@ -1,5 +1,6 @@
 use super::FnCtxt;
 use crate::astconv::AstConv;
+use crate::errors::{AddReturnTypeSuggestion, ExpectedReturnTypeLabel};
 
 use rustc_ast::util::parser::ExprPrecedence;
 use rustc_errors::{Applicability, Diagnostic, MultiSpan};
@@ -525,30 +526,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.resolve_numeric_literals_with_default(self.resolve_vars_if_possible(found));
         // Only suggest changing the return type for methods that
         // haven't set a return type at all (and aren't `fn main()` or an impl).
-        match (&fn_decl.output, found.is_suggestable(), can_suggest, expected.is_unit()) {
+        match (&fn_decl.output, found.is_suggestable(self.tcx), can_suggest, expected.is_unit()) {
             (&hir::FnRetTy::DefaultReturn(span), true, true, true) => {
-                err.span_suggestion(
-                    span,
-                    "try adding a return type",
-                    format!("-> {} ", found),
-                    Applicability::MachineApplicable,
-                );
+                err.subdiagnostic(AddReturnTypeSuggestion::Add { span, found });
                 true
             }
             (&hir::FnRetTy::DefaultReturn(span), false, true, true) => {
                 // FIXME: if `found` could be `impl Iterator` or `impl Fn*`, we should suggest
                 // that.
-                err.span_suggestion(
-                    span,
-                    "a return type might be missing here",
-                    "-> _ ".to_string(),
-                    Applicability::HasPlaceholders,
-                );
+                err.subdiagnostic(AddReturnTypeSuggestion::MissingHere { span });
                 true
             }
             (&hir::FnRetTy::DefaultReturn(span), _, false, true) => {
                 // `fn main()` must return `()`, do not suggest changing return type
-                err.span_label(span, "expected `()` because of default return type");
+                err.subdiagnostic(ExpectedReturnTypeLabel::Unit { span });
                 true
             }
             // expectation was caused by something else, not the default return
@@ -557,16 +548,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // Only point to return type if the expected type is the return type, as if they
                 // are not, the expectation must have been caused by something else.
                 debug!("suggest_missing_return_type: return type {:?} node {:?}", ty, ty.kind);
-                let sp = ty.span;
+                let span = ty.span;
                 let ty = <dyn AstConv<'_>>::ast_ty_to_ty(self, ty);
                 debug!("suggest_missing_return_type: return type {:?}", ty);
                 debug!("suggest_missing_return_type: expected type {:?}", ty);
                 let bound_vars = self.tcx.late_bound_vars(fn_id);
                 let ty = Binder::bind_with_vars(ty, bound_vars);
-                let ty = self.normalize_associated_types_in(sp, ty);
+                let ty = self.normalize_associated_types_in(span, ty);
                 let ty = self.tcx.erase_late_bound_regions(ty);
                 if self.can_coerce(expected, ty) {
-                    err.span_label(sp, format!("expected `{}` because of return type", expected));
+                    err.subdiagnostic(ExpectedReturnTypeLabel::Other { span, expected });
                     self.try_suggest_return_impl_trait(err, expected, ty, fn_id);
                     return true;
                 }
@@ -608,17 +599,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             kind:
                 hir::ItemKind::Fn(
                     hir::FnSig { decl: hir::FnDecl { inputs: fn_parameters, output: fn_return, .. }, .. },
-                    hir::Generics { params, where_clause, .. },
+                    hir::Generics { params, predicates, .. },
                     _body_id,
                 ),
             ..
         })) = fn_node else { return };
 
-        let Some(expected_generic_param) = params.get(expected_ty_as_param.index as usize) else { return };
+        if params.get(expected_ty_as_param.index as usize).is_none() {
+            return;
+        };
 
         // get all where BoundPredicates here, because they are used in to cases below
-        let where_predicates = where_clause
-            .predicates
+        let where_predicates = predicates
             .iter()
             .filter_map(|p| match p {
                 WherePredicate::BoundPredicate(hir::WhereBoundPredicate {
@@ -646,13 +638,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         // now get all predicates in the same types as the where bounds, so we can chain them
         let predicates_from_where =
-            where_predicates.iter().flatten().map(|bounds| bounds.iter()).flatten();
+            where_predicates.iter().flatten().flat_map(|bounds| bounds.iter());
 
         // extract all bounds from the source code using their spans
-        let all_matching_bounds_strs = expected_generic_param
-            .bounds
-            .iter()
-            .chain(predicates_from_where)
+        let all_matching_bounds_strs = predicates_from_where
             .filter_map(|bound| match bound {
                 GenericBound::Trait(_, _) => {
                     self.tcx.sess.source_map().span_to_snippet(bound.span()).ok()

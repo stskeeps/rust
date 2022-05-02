@@ -240,6 +240,7 @@
 #![feature(exhaustive_patterns)]
 #![feature(intra_doc_pointers)]
 #![feature(lang_items)]
+#![feature(let_chains)]
 #![feature(linkage)]
 #![feature(min_specialization)]
 #![feature(must_not_suspend)]
@@ -260,7 +261,10 @@
 #![feature(atomic_mut_ptr)]
 #![feature(char_error_internals)]
 #![feature(char_internals)]
+#![feature(core_c_str)]
 #![feature(core_intrinsics)]
+#![feature(cstr_from_bytes_until_nul)]
+#![feature(cstr_internals)]
 #![feature(duration_checked_float)]
 #![feature(duration_constants)]
 #![feature(exact_size_is_empty)]
@@ -276,6 +280,7 @@
 #![feature(panic_info_message)]
 #![feature(panic_internals)]
 #![feature(portable_simd)]
+#![feature(prelude_2024)]
 #![feature(ptr_as_uninit)]
 #![feature(raw_os_nonzero)]
 #![feature(slice_internals)]
@@ -286,6 +291,7 @@
 //
 // Library features (alloc):
 #![feature(alloc_layout_extra)]
+#![feature(alloc_c_string)]
 #![feature(allocator_api)]
 #![feature(get_mut_unchecked)]
 #![feature(map_try_insert)]
@@ -301,7 +307,6 @@
 // Only for re-exporting:
 #![feature(assert_matches)]
 #![feature(async_iterator)]
-#![feature(c_size_t)]
 #![feature(c_variadic)]
 #![feature(cfg_accessible)]
 #![feature(cfg_eval)]

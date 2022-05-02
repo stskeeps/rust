@@ -21,6 +21,8 @@ use crate::fmt;
 /// The [`with`] method yields a reference to the contained value which cannot be
 /// sent across threads or escape the given closure.
 ///
+/// [`thread_local!`]: crate::thread_local
+///
 /// # Initialization and Destruction
 ///
 /// Initialization is dynamically performed on the first call to [`with`]
@@ -178,7 +180,8 @@ macro_rules! thread_local {
 macro_rules! __thread_local_inner {
     // used to generate the `LocalKey` value for const-initialized thread locals
     (@key $t:ty, const $init:expr) => {{
-        #[cfg_attr(not(windows), inline(always))] // see comments below
+        #[cfg_attr(not(windows), inline)] // see comments below
+        #[deny(unsafe_op_in_unsafe_fn)]
         unsafe fn __getit(
             _init: $crate::option::Option<&mut $crate::option::Option<$t>>,
         ) -> $crate::option::Option<&'static $t> {
@@ -193,7 +196,7 @@ macro_rules! __thread_local_inner {
             #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
             {
                 static mut VAL: $t = INIT_EXPR;
-                $crate::option::Option::Some(&VAL)
+                unsafe { $crate::option::Option::Some(&VAL) }
             }
 
             // If the platform has support for `#[thread_local]`, use it.
@@ -311,7 +314,7 @@ macro_rules! __thread_local_inner {
             // gets the pessimistic path for now where it's never inlined.
             //
             // The issue of "should enable on Windows sometimes" is #84933
-            #[cfg_attr(not(windows), inline(always))]
+            #[cfg_attr(not(windows), inline)]
             unsafe fn __getit(
                 init: $crate::option::Option<&mut $crate::option::Option<$t>>,
             ) -> $crate::option::Option<&'static $t> {

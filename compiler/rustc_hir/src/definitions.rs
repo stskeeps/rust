@@ -147,6 +147,11 @@ impl DefKey {
         // DefPathHashes in this DefPathTable.
         DefPathHash::new(parent.stable_crate_id(), local_hash)
     }
+
+    #[inline]
+    pub fn get_opt_name(&self) -> Option<Symbol> {
+        self.disambiguated_data.data.get_opt_name()
+    }
 }
 
 /// A pair of `DefPathData` and an integer disambiguator. The integer is
@@ -346,11 +351,6 @@ impl Definitions {
             def_id_to_span,
             stable_crate_id,
         }
-    }
-
-    /// Retrieves the root definition.
-    pub fn get_root_def(&self) -> LocalDefId {
-        LocalDefId { local_def_index: CRATE_DEF_INDEX }
     }
 
     /// Adds a definition with a parent definition.

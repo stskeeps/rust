@@ -20,8 +20,8 @@ use rustc_errors::emitter::{Emitter, EmitterWriter, HumanReadableErrorType};
 use rustc_errors::json::JsonEmitter;
 use rustc_errors::registry::Registry;
 use rustc_errors::{
-    fallback_fluent_bundle, fluent_bundle, DiagnosticBuilder, DiagnosticId, DiagnosticMessage,
-    EmissionGuarantee, ErrorGuaranteed, FluentBundle, MultiSpan,
+    fallback_fluent_bundle, DiagnosticBuilder, DiagnosticId, DiagnosticMessage, EmissionGuarantee,
+    ErrorGuaranteed, FluentBundle, LazyFallbackBundle, MultiSpan,
 };
 use rustc_macros::HashStable_Generic;
 pub use rustc_span::def_id::StableCrateId;
@@ -212,7 +212,7 @@ pub struct PerfStats {
 pub trait SessionDiagnostic<'a, T: EmissionGuarantee = ErrorGuaranteed> {
     /// Write out as a diagnostic out of `sess`.
     #[must_use]
-    fn into_diagnostic(self, sess: &'a Session) -> DiagnosticBuilder<'a, T>;
+    fn into_diagnostic(self, sess: &'a ParseSess) -> DiagnosticBuilder<'a, T>;
 }
 
 impl Session {
@@ -238,7 +238,7 @@ impl Session {
             }
             diag.emit();
             // If we should err, make sure we did.
-            if must_err && !self.has_errors().is_some() {
+            if must_err && self.has_errors().is_none() {
                 // We have skipped a feature gate, and not run into other errors... reject.
                 self.err(
                     "`-Zunleash-the-miri-inside-of-you` may not be used to circumvent feature \
@@ -334,7 +334,7 @@ impl Session {
         &self,
         msg: impl Into<DiagnosticMessage>,
     ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
-        self.diagnostic().struct_err(msg)
+        self.parse_sess.struct_err(msg)
     }
     pub fn struct_err_with_code(
         &self,
@@ -414,10 +414,10 @@ impl Session {
         self.diagnostic().err(msg)
     }
     pub fn emit_err<'a>(&'a self, err: impl SessionDiagnostic<'a>) -> ErrorGuaranteed {
-        err.into_diagnostic(self).emit()
+        self.parse_sess.emit_err(err)
     }
     pub fn emit_warning<'a>(&'a self, warning: impl SessionDiagnostic<'a, ()>) {
-        warning.into_diagnostic(self).emit()
+        self.parse_sess.emit_warning(warning)
     }
     #[inline]
     pub fn err_count(&self) -> usize {
@@ -991,6 +991,11 @@ impl Session {
         self.opts.edition >= Edition::Edition2021
     }
 
+    /// Are we allowed to use features from the Rust 2024 edition?
+    pub fn rust_2024(&self) -> bool {
+        self.opts.edition >= Edition::Edition2024
+    }
+
     pub fn edition(&self) -> Edition {
         self.opts.edition
     }
@@ -1080,7 +1085,7 @@ fn default_emitter(
     registry: rustc_errors::registry::Registry,
     source_map: Lrc<SourceMap>,
     bundle: Option<Lrc<FluentBundle>>,
-    fallback_bundle: Lrc<FluentBundle>,
+    fallback_bundle: LazyFallbackBundle,
     emitter_dest: Option<Box<dyn Write + Send>>,
 ) -> Box<dyn Emitter + sync::Send> {
     let macro_backtrace = sopts.debugging_opts.macro_backtrace;
@@ -1162,6 +1167,7 @@ pub enum DiagnosticOutput {
 pub fn build_session(
     sopts: config::Options,
     local_crate_source_file: Option<PathBuf>,
+    bundle: Option<Lrc<rustc_errors::FluentBundle>>,
     registry: rustc_errors::registry::Registry,
     diagnostics_output: DiagnosticOutput,
     driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
@@ -1214,16 +1220,10 @@ pub fn build_session(
         hash_kind,
     ));
 
-    let bundle = fluent_bundle(
-        &sysroot,
-        sopts.debugging_opts.translate_lang.clone(),
-        sopts.debugging_opts.translate_additional_ftl.as_deref(),
+    let fallback_bundle = fallback_fluent_bundle(
+        rustc_errors::DEFAULT_LOCALE_RESOURCES,
         sopts.debugging_opts.translate_directionality_markers,
-    )
-    .expect("failed to load fluent bundle");
-    let fallback_bundle =
-        fallback_fluent_bundle(sopts.debugging_opts.translate_directionality_markers)
-            .expect("failed to load fallback fluent bundle");
+    );
     let emitter =
         default_emitter(&sopts, registry, source_map.clone(), bundle, fallback_bundle, write_dest);
 
@@ -1458,8 +1458,7 @@ pub enum IncrCompSession {
 }
 
 fn early_error_handler(output: config::ErrorOutputType) -> rustc_errors::Handler {
-    let fallback_bundle =
-        fallback_fluent_bundle(false).expect("failed to load fallback fluent bundle");
+    let fallback_bundle = fallback_fluent_bundle(rustc_errors::DEFAULT_LOCALE_RESOURCES, false);
     let emitter: Box<dyn Emitter + sync::Send> = match output {
         config::ErrorOutputType::HumanReadable(kind) => {
             let (short, color_config) = kind.unzip();

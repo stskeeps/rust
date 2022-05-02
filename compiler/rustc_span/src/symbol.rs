@@ -101,6 +101,7 @@ symbols! {
         MacroRules:         "macro_rules",
         Raw:                "raw",
         Union:              "union",
+        Yeet:               "yeet",
     }
 
     // Pre-interned symbols that can be referred to with `rustc_span::sym::*`.
@@ -714,6 +715,7 @@ symbols! {
         from_residual,
         from_size_align_unchecked,
         from_usize,
+        from_yeet,
         fsub_fast,
         fundamental,
         future,
@@ -803,6 +805,7 @@ symbols! {
         keyword,
         kind,
         kreg,
+        kreg0,
         label,
         label_break_value,
         lang,
@@ -1149,6 +1152,8 @@ symbols! {
         rust_2018_preview,
         rust_2021,
         rust_2021_preview,
+        rust_2024,
+        rust_2024_preview,
         rust_begin_unwind,
         rust_eh_catch_typeinfo,
         rust_eh_personality,
@@ -1245,6 +1250,7 @@ symbols! {
         simd,
         simd_add,
         simd_and,
+        simd_arith_offset,
         simd_as,
         simd_bitmask,
         simd_cast,
@@ -1530,6 +1536,8 @@ symbols! {
         x87_reg,
         xer,
         xmm_reg,
+        yeet_desugar_details,
+        yeet_expr,
         ymm_reg,
         zmm_reg,
     }

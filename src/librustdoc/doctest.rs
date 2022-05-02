@@ -168,7 +168,7 @@ crate fn run(options: RustdocOptions) -> Result<(), ErrorGuaranteed> {
 
     // Collect and warn about unused externs, but only if we've gotten
     // reports for each doctest
-    if json_unused_externs {
+    if json_unused_externs.is_enabled() {
         let unused_extern_reports: Vec<_> =
             std::mem::take(&mut unused_extern_reports.lock().unwrap());
         if unused_extern_reports.len() == compiling_test_count {
@@ -337,7 +337,7 @@ fn run_test(
     if lang_string.test_harness {
         compiler.arg("--test");
     }
-    if rustdoc_options.json_unused_externs && !lang_string.compile_fail {
+    if rustdoc_options.json_unused_externs.is_enabled() && !lang_string.compile_fail {
         compiler.arg("--error-format=json");
         compiler.arg("--json").arg("unused-externs");
         compiler.arg("-Z").arg("unstable-options");
@@ -537,8 +537,8 @@ crate fn make_test(
             // Any errors in parsing should also appear when the doctest is compiled for real, so just
             // send all the errors that librustc_ast emits directly into a `Sink` instead of stderr.
             let sm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-            let fallback_bundle = rustc_errors::fallback_fluent_bundle(false)
-                .expect("failed to load fallback fluent bundle");
+            let fallback_bundle =
+                rustc_errors::fallback_fluent_bundle(rustc_errors::DEFAULT_LOCALE_RESOURCES, false);
             supports_color = EmitterWriter::stderr(
                 ColorConfig::Auto,
                 None,
@@ -1069,13 +1069,7 @@ impl Tester for Collector {
                             }
                         }
                         TestFailure::ExecutionFailure(out) => {
-                            let reason = if let Some(code) = out.status.code() {
-                                format!("exit code {code}")
-                            } else {
-                                String::from("terminated by signal")
-                            };
-
-                            eprintln!("Test executable failed ({reason}).");
+                            eprintln!("Test executable failed ({reason}).", reason = out.status);
 
                             // FIXME(#12309): An unfortunate side-effect of capturing the test
                             // executable's output is that the relative ordering between the test's
@@ -1180,8 +1174,6 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
         nested: F,
     ) {
         let ast_attrs = self.tcx.hir().attrs(hir_id);
-        let mut attrs = Attributes::from_ast(ast_attrs, None);
-
         if let Some(ref cfg) = ast_attrs.cfg(self.tcx, &FxHashSet::default()) {
             if !cfg.matches(&self.sess.parse_sess, Some(self.sess.features_untracked())) {
                 return;
@@ -1193,9 +1185,9 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
             self.collector.names.push(name);
         }
 
-        attrs.unindent_doc_comments();
         // The collapse-docs pass won't combine sugared/raw doc attributes, or included files with
         // anything else, this will combine them for us.
+        let attrs = Attributes::from_ast(ast_attrs, None);
         if let Some(doc) = attrs.collapsed_doc_value() {
             // Use the outermost invocation, so that doctest names come from where the docs were written.
             let span = ast_attrs

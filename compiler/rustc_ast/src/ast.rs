@@ -23,7 +23,7 @@ pub use GenericArgs::*;
 pub use UnsafeSource::*;
 
 use crate::ptr::P;
-use crate::token::{self, CommentKind, DelimToken, Token};
+use crate::token::{self, CommentKind, Delimiter, Token};
 use crate::tokenstream::{DelimSpan, LazyTokenStream, TokenStream, TokenTree};
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
@@ -107,11 +107,11 @@ impl PartialEq<Symbol> for Path {
     }
 }
 
-impl<CTX> HashStable<CTX> for Path {
+impl<CTX: rustc_span::HashStableContext> HashStable<CTX> for Path {
     fn hash_stable(&self, hcx: &mut CTX, hasher: &mut StableHasher) {
         self.segments.len().hash_stable(hcx, hasher);
         for segment in &self.segments {
-            segment.ident.name.hash_stable(hcx, hasher);
+            segment.ident.hash_stable(hcx, hasher);
         }
     }
 }
@@ -397,6 +397,7 @@ pub struct GenericParam {
     pub bounds: GenericBounds,
     pub is_placeholder: bool,
     pub kind: GenericParamKind,
+    pub colon_span: Option<Span>,
 }
 
 impl GenericParam {
@@ -1274,6 +1275,7 @@ impl Expr {
             ExprKind::Paren(..) => ExprPrecedence::Paren,
             ExprKind::Try(..) => ExprPrecedence::Try,
             ExprKind::Yield(..) => ExprPrecedence::Yield,
+            ExprKind::Yeet(..) => ExprPrecedence::Yeet,
             ExprKind::Err => ExprPrecedence::Err,
         }
     }
@@ -1461,6 +1463,10 @@ pub enum ExprKind {
     /// A `yield`, with an optional value to be yielded.
     Yield(Option<P<Expr>>),
 
+    /// A `do yeet` (aka `throw`/`fail`/`bail`/`raise`/whatever),
+    /// with an optional value to be returned.
+    Yeet(Option<P<Expr>>),
+
     /// Placeholder for an expression that wasn't syntactically well formed in some way.
     Err,
 }
@@ -1542,10 +1548,10 @@ pub enum MacArgs {
 }
 
 impl MacArgs {
-    pub fn delim(&self) -> DelimToken {
+    pub fn delim(&self) -> Option<Delimiter> {
         match self {
-            MacArgs::Delimited(_, delim, _) => delim.to_token(),
-            MacArgs::Empty | MacArgs::Eq(..) => token::NoDelim,
+            MacArgs::Delimited(_, delim, _) => Some(delim.to_token()),
+            MacArgs::Empty | MacArgs::Eq(..) => None,
         }
     }
 
@@ -1582,20 +1588,20 @@ pub enum MacDelimiter {
 }
 
 impl MacDelimiter {
-    pub fn to_token(self) -> DelimToken {
+    pub fn to_token(self) -> Delimiter {
         match self {
-            MacDelimiter::Parenthesis => DelimToken::Paren,
-            MacDelimiter::Bracket => DelimToken::Bracket,
-            MacDelimiter::Brace => DelimToken::Brace,
+            MacDelimiter::Parenthesis => Delimiter::Parenthesis,
+            MacDelimiter::Bracket => Delimiter::Bracket,
+            MacDelimiter::Brace => Delimiter::Brace,
         }
     }
 
-    pub fn from_token(delim: DelimToken) -> Option<MacDelimiter> {
+    pub fn from_token(delim: Delimiter) -> Option<MacDelimiter> {
         match delim {
-            token::Paren => Some(MacDelimiter::Parenthesis),
-            token::Bracket => Some(MacDelimiter::Bracket),
-            token::Brace => Some(MacDelimiter::Brace),
-            token::NoDelim => None,
+            Delimiter::Parenthesis => Some(MacDelimiter::Parenthesis),
+            Delimiter::Bracket => Some(MacDelimiter::Bracket),
+            Delimiter::Brace => Some(MacDelimiter::Brace),
+            Delimiter::Invisible => None,
         }
     }
 }
@@ -2061,6 +2067,20 @@ impl InlineAsmTemplatePiece {
     }
 }
 
+/// Inline assembly symbol operands get their own AST node that is somewhat
+/// similar to `AnonConst`.
+///
+/// The main difference is that we specifically don't assign it `DefId` in
+/// `DefCollector`. Instead this is deferred until AST lowering where we
+/// lower it to an `AnonConst` (for functions) or a `Path` (for statics)
+/// depending on what the path resolves to.
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub struct InlineAsmSym {
+    pub id: NodeId,
+    pub qself: Option<QSelf>,
+    pub path: Path,
+}
+
 /// Inline assembly operand.
 ///
 /// E.g., `out("eax") result` as in `asm!("mov eax, 2", out("eax") result)`.
@@ -2090,7 +2110,7 @@ pub enum InlineAsmOperand {
         anon_const: AnonConst,
     },
     Sym {
-        expr: P<Expr>,
+        sym: InlineAsmSym,
     },
 }
 
@@ -2483,7 +2503,7 @@ pub struct TraitRef {
 
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct PolyTraitRef {
-    /// The `'a` in `<'a> Foo<&'a T>`.
+    /// The `'a` in `for<'a> Foo<&'a T>`.
     pub bound_generic_params: Vec<GenericParam>,
 
     /// The `Foo<&'a T>` in `<'a> Foo<&'a T>`.

@@ -77,25 +77,14 @@ use crate::mbe::{KleeneOp, TokenTree};
 
 use rustc_ast::token::{self, DocComment, Nonterminal, NonterminalKind, Token};
 use rustc_parse::parser::{NtOrTt, Parser};
-use rustc_session::parse::ParseSess;
 use rustc_span::symbol::MacroRulesNormalizedIdent;
 use rustc_span::Span;
-
-use smallvec::{smallvec, SmallVec};
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::Lrc;
 use rustc_span::symbol::Ident;
 use std::borrow::Cow;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-
-// One element is enough to cover 95-99% of vectors for most benchmarks. Also, vectors longer than
-// one frequently have many elements, not just two or three.
-type NamedMatchVec = SmallVec<[NamedMatch; 1]>;
-
-// This type is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(NamedMatchVec, 48);
 
 /// A unit within a matcher that a `MatcherPos` can refer to. Similar to (and derived from)
 /// `mbe::TokenTree`, but designed specifically for fast and easy traversal during matching.
@@ -138,9 +127,8 @@ pub(super) enum MatcherLoc {
     Eof,
 }
 
-pub(super) fn compute_locs(sess: &ParseSess, matcher: &[TokenTree]) -> Vec<MatcherLoc> {
+pub(super) fn compute_locs(matcher: &[TokenTree]) -> Vec<MatcherLoc> {
     fn inner(
-        sess: &ParseSess,
         tts: &[TokenTree],
         locs: &mut Vec<MatcherLoc>,
         next_metavar: &mut usize,
@@ -152,10 +140,13 @@ pub(super) fn compute_locs(sess: &ParseSess, matcher: &[TokenTree]) -> Vec<Match
                     locs.push(MatcherLoc::Token { token: token.clone() });
                 }
                 TokenTree::Delimited(span, delimited) => {
+                    let open_token = Token::new(token::OpenDelim(delimited.delim), span.open);
+                    let close_token = Token::new(token::CloseDelim(delimited.delim), span.close);
+
                     locs.push(MatcherLoc::Delimited);
-                    inner(sess, &[delimited.open_tt(*span)], locs, next_metavar, seq_depth);
-                    inner(sess, &delimited.tts, locs, next_metavar, seq_depth);
-                    inner(sess, &[delimited.close_tt(*span)], locs, next_metavar, seq_depth);
+                    locs.push(MatcherLoc::Token { token: open_token });
+                    inner(&delimited.tts, locs, next_metavar, seq_depth);
+                    locs.push(MatcherLoc::Token { token: close_token });
                 }
                 TokenTree::Sequence(_, seq) => {
                     // We can't determine `idx_first_after` and construct the final
@@ -169,7 +160,7 @@ pub(super) fn compute_locs(sess: &ParseSess, matcher: &[TokenTree]) -> Vec<Match
                     let op = seq.kleene.op;
                     let idx_first = locs.len();
                     let idx_seq = idx_first - 1;
-                    inner(sess, &seq.tts, locs, next_metavar, seq_depth + 1);
+                    inner(&seq.tts, locs, next_metavar, seq_depth + 1);
 
                     if let Some(separator) = &seq.separator {
                         locs.push(MatcherLoc::SequenceSep { separator: separator.clone() });
@@ -204,7 +195,7 @@ pub(super) fn compute_locs(sess: &ParseSess, matcher: &[TokenTree]) -> Vec<Match
 
     let mut locs = vec![];
     let mut next_metavar = 0;
-    inner(sess, matcher, &mut locs, &mut next_metavar, /* seq_depth */ 0);
+    inner(matcher, &mut locs, &mut next_metavar, /* seq_depth */ 0);
 
     // A final entry is needed for eof.
     locs.push(MatcherLoc::Eof);
@@ -221,7 +212,11 @@ struct MatcherPos {
     /// with one element per metavar decl in the matcher. Each element records token trees matched
     /// against the relevant metavar by the black box parser. An element will be a `MatchedSeq` if
     /// the corresponding metavar decl is within a sequence.
-    matches: Lrc<NamedMatchVec>,
+    ///
+    /// It is critical to performance that this is an `Lrc`, because it gets cloned frequently when
+    /// processing sequences. Mostly for sequence-ending possibilities that must be tried but end
+    /// up failing.
+    matches: Lrc<Vec<NamedMatch>>,
 }
 
 // This type is used a lot. Make sure it doesn't unintentionally get bigger.
@@ -246,18 +241,12 @@ impl MatcherPos {
                 let mut curr = &mut matches[metavar_idx];
                 for _ in 0..seq_depth - 1 {
                     match curr {
-                        MatchedSeq(seq) => {
-                            let seq = Lrc::make_mut(seq);
-                            curr = seq.last_mut().unwrap();
-                        }
+                        MatchedSeq(seq) => curr = seq.last_mut().unwrap(),
                         _ => unreachable!(),
                     }
                 }
                 match curr {
-                    MatchedSeq(seq) => {
-                        let seq = Lrc::make_mut(seq);
-                        seq.push(m);
-                    }
+                    MatchedSeq(seq) => seq.push(m),
                     _ => unreachable!(),
                 }
             }
@@ -350,7 +339,7 @@ pub(super) fn count_metavar_decls(matcher: &[TokenTree]) -> usize {
 /// ```
 #[derive(Debug, Clone)]
 crate enum NamedMatch {
-    MatchedSeq(Lrc<NamedMatchVec>),
+    MatchedSeq(Vec<NamedMatch>),
 
     // A metavar match of type `tt`.
     MatchedTokenTree(rustc_ast::tokenstream::TokenTree),
@@ -388,7 +377,7 @@ pub struct TtParser {
 
     /// Pre-allocate an empty match array, so it can be cloned cheaply for macros with many rules
     /// that have no metavars.
-    empty_matches: Lrc<NamedMatchVec>,
+    empty_matches: Lrc<Vec<NamedMatch>>,
 }
 
 impl TtParser {
@@ -398,7 +387,7 @@ impl TtParser {
             cur_mps: vec![],
             next_mps: vec![],
             bb_mps: vec![],
-            empty_matches: Lrc::new(smallvec![]),
+            empty_matches: Lrc::new(vec![]),
         }
     }
 
@@ -411,7 +400,6 @@ impl TtParser {
     /// track of through the mps generated.
     fn parse_tt_inner(
         &mut self,
-        sess: &ParseSess,
         matcher: &[MatcherLoc],
         token: &Token,
     ) -> Option<NamedParseResult> {
@@ -453,11 +441,7 @@ impl TtParser {
                 } => {
                     // Install an empty vec for each metavar within the sequence.
                     for metavar_idx in next_metavar..next_metavar + num_metavar_decls {
-                        mp.push_match(
-                            metavar_idx,
-                            seq_depth,
-                            MatchedSeq(self.empty_matches.clone()),
-                        );
+                        mp.push_match(metavar_idx, seq_depth, MatchedSeq(vec![]));
                     }
 
                     if op == KleeneOp::ZeroOrMore || op == KleeneOp::ZeroOrOne {
@@ -519,11 +503,9 @@ impl TtParser {
                             self.bb_mps.push(mp);
                         }
                     } else {
+                        // E.g. `$e` instead of `$e:expr`, reported as a hard error if actually used.
                         // Both this check and the one in `nameize` are necessary, surprisingly.
-                        if sess.missing_fragment_specifiers.borrow_mut().remove(&span).is_some() {
-                            // E.g. `$e` instead of `$e:expr`.
-                            return Some(Error(span, "missing fragment specifier".to_string()));
-                        }
+                        return Some(Error(span, "missing fragment specifier".to_string()));
                     }
                 }
                 MatcherLoc::Eof => {
@@ -549,7 +531,7 @@ impl TtParser {
                     // Need to take ownership of the matches from within the `Lrc`.
                     Lrc::make_mut(&mut eof_mp.matches);
                     let matches = Lrc::try_unwrap(eof_mp.matches).unwrap().into_iter();
-                    self.nameize(sess, matcher, matches)
+                    self.nameize(matcher, matches)
                 }
                 EofMatcherPositions::Multiple => {
                     Error(token.span, "ambiguity: multiple successful parses".to_string())
@@ -587,7 +569,7 @@ impl TtParser {
 
             // Process `cur_mps` until either we have finished the input or we need to get some
             // parsing from the black-box parser done.
-            if let Some(res) = self.parse_tt_inner(&parser.sess, matcher, &parser.token) {
+            if let Some(res) = self.parse_tt_inner(matcher, &parser.token) {
                 return res;
             }
 
@@ -608,7 +590,7 @@ impl TtParser {
                 (_, 0) => {
                     // Dump all possible `next_mps` into `cur_mps` for the next iteration. Then
                     // process the next token.
-                    self.cur_mps.extend(self.next_mps.drain(..));
+                    self.cur_mps.append(&mut self.next_mps);
                     parser.to_mut().bump();
                 }
 
@@ -694,7 +676,6 @@ impl TtParser {
 
     fn nameize<I: Iterator<Item = NamedMatch>>(
         &self,
-        sess: &ParseSess,
         matcher: &[MatcherLoc],
         mut res: I,
     ) -> NamedParseResult {
@@ -711,11 +692,9 @@ impl TtParser {
                         }
                     };
                 } else {
+                    // E.g. `$e` instead of `$e:expr`, reported as a hard error if actually used.
                     // Both this check and the one in `parse_tt_inner` are necessary, surprisingly.
-                    if sess.missing_fragment_specifiers.borrow_mut().remove(&span).is_some() {
-                        // E.g. `$e` instead of `$e:expr`.
-                        return Error(span, "missing fragment specifier".to_string());
-                    }
+                    return Error(span, "missing fragment specifier".to_string());
                 }
             }
         }

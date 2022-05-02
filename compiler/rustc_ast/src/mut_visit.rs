@@ -280,6 +280,14 @@ pub trait MutVisitor: Sized {
     fn flat_map_pat_field(&mut self, fp: PatField) -> SmallVec<[PatField; 1]> {
         noop_flat_map_pat_field(fp, self)
     }
+
+    fn visit_inline_asm(&mut self, asm: &mut InlineAsm) {
+        noop_visit_inline_asm(asm, self)
+    }
+
+    fn visit_inline_asm_sym(&mut self, sym: &mut InlineAsmSym) {
+        noop_visit_inline_asm_sym(sym, self)
+    }
 }
 
 /// Use a map-style function (`FnOnce(T) -> T`) to overwrite a `&mut T`. Useful
@@ -859,9 +867,12 @@ pub fn noop_flat_map_generic_param<T: MutVisitor>(
     mut param: GenericParam,
     vis: &mut T,
 ) -> SmallVec<[GenericParam; 1]> {
-    let GenericParam { id, ident, attrs, bounds, kind, is_placeholder: _ } = &mut param;
+    let GenericParam { id, ident, attrs, bounds, kind, colon_span, is_placeholder: _ } = &mut param;
     vis.visit_id(id);
     vis.visit_ident(ident);
+    if let Some(ref mut colon_span) = colon_span {
+        vis.visit_span(colon_span);
+    }
     visit_thin_attrs(attrs, vis);
     visit_vec(bounds, |bound| noop_visit_param_bound(bound, vis));
     match kind {
@@ -1019,7 +1030,7 @@ pub fn noop_visit_item_kind<T: MutVisitor>(kind: &mut ItemKind, vis: &mut T) {
             }
         }
         ItemKind::ForeignMod(nm) => vis.visit_foreign_mod(nm),
-        ItemKind::GlobalAsm(asm) => noop_visit_inline_asm(asm, vis),
+        ItemKind::GlobalAsm(asm) => vis.visit_inline_asm(asm),
         ItemKind::TyAlias(box TyAlias {
             defaultness, generics, where_clauses, bounds, ty, ..
         }) => {
@@ -1237,13 +1248,12 @@ pub fn noop_visit_anon_const<T: MutVisitor>(AnonConst { id, value }: &mut AnonCo
     vis.visit_expr(value);
 }
 
-fn noop_visit_inline_asm<T: MutVisitor>(asm: &mut InlineAsm, vis: &mut T) {
+pub fn noop_visit_inline_asm<T: MutVisitor>(asm: &mut InlineAsm, vis: &mut T) {
     for (op, _) in &mut asm.operands {
         match op {
             InlineAsmOperand::In { expr, .. }
             | InlineAsmOperand::Out { expr: Some(expr), .. }
-            | InlineAsmOperand::InOut { expr, .. }
-            | InlineAsmOperand::Sym { expr, .. } => vis.visit_expr(expr),
+            | InlineAsmOperand::InOut { expr, .. } => vis.visit_expr(expr),
             InlineAsmOperand::Out { expr: None, .. } => {}
             InlineAsmOperand::SplitInOut { in_expr, out_expr, .. } => {
                 vis.visit_expr(in_expr);
@@ -1251,9 +1261,19 @@ fn noop_visit_inline_asm<T: MutVisitor>(asm: &mut InlineAsm, vis: &mut T) {
                     vis.visit_expr(out_expr);
                 }
             }
-            InlineAsmOperand::Const { anon_const, .. } => vis.visit_anon_const(anon_const),
+            InlineAsmOperand::Const { anon_const } => vis.visit_anon_const(anon_const),
+            InlineAsmOperand::Sym { sym } => vis.visit_inline_asm_sym(sym),
         }
     }
+}
+
+pub fn noop_visit_inline_asm_sym<T: MutVisitor>(
+    InlineAsmSym { id, qself, path }: &mut InlineAsmSym,
+    vis: &mut T,
+) {
+    vis.visit_id(id);
+    vis.visit_qself(qself);
+    vis.visit_path(path);
 }
 
 pub fn noop_visit_expr<T: MutVisitor>(
@@ -1374,7 +1394,10 @@ pub fn noop_visit_expr<T: MutVisitor>(
         ExprKind::Ret(expr) => {
             visit_opt(expr, |expr| vis.visit_expr(expr));
         }
-        ExprKind::InlineAsm(asm) => noop_visit_inline_asm(asm, vis),
+        ExprKind::Yeet(expr) => {
+            visit_opt(expr, |expr| vis.visit_expr(expr));
+        }
+        ExprKind::InlineAsm(asm) => vis.visit_inline_asm(asm),
         ExprKind::MacCall(mac) => vis.visit_mac_call(mac),
         ExprKind::Struct(se) => {
             let StructExpr { qself, path, fields, rest } = se.deref_mut();

@@ -1,5 +1,7 @@
 //! Errors emitted by typeck.
-use rustc_macros::SessionDiagnostic;
+use rustc_errors::Applicability;
+use rustc_macros::{SessionDiagnostic, SessionSubdiagnostic};
+use rustc_middle::ty::Ty;
 use rustc_span::{symbol::Ident, Span, Symbol};
 
 #[derive(SessionDiagnostic)]
@@ -127,10 +129,13 @@ pub struct FunctionalRecordUpdateOnNonStruct {
 
 #[derive(SessionDiagnostic)]
 #[error(code = "E0516", slug = "typeck-typeof-reserved-keyword-used")]
-pub struct TypeofReservedKeywordUsed {
+pub struct TypeofReservedKeywordUsed<'tcx> {
+    pub ty: Ty<'tcx>,
     #[primary_span]
     #[label]
     pub span: Span,
+    #[suggestion_verbose(code = "{ty}")]
+    pub opt_sugg: Option<(Span, Applicability)>,
 }
 
 #[derive(SessionDiagnostic)]
@@ -184,4 +189,42 @@ pub struct AddressOfTemporaryTaken {
     #[primary_span]
     #[label]
     pub span: Span,
+}
+
+#[derive(SessionSubdiagnostic)]
+pub enum AddReturnTypeSuggestion<'tcx> {
+    #[suggestion(
+        slug = "typeck-add-return-type-add",
+        code = "-> {found} ",
+        applicability = "machine-applicable"
+    )]
+    Add {
+        #[primary_span]
+        span: Span,
+        found: Ty<'tcx>,
+    },
+    #[suggestion(
+        slug = "typeck-add-return-type-missing-here",
+        code = "-> _ ",
+        applicability = "has-placeholders"
+    )]
+    MissingHere {
+        #[primary_span]
+        span: Span,
+    },
+}
+
+#[derive(SessionSubdiagnostic)]
+pub enum ExpectedReturnTypeLabel<'tcx> {
+    #[label(slug = "typeck-expected-default-return-type")]
+    Unit {
+        #[primary_span]
+        span: Span,
+    },
+    #[label(slug = "typeck-expected-return-type")]
+    Other {
+        #[primary_span]
+        span: Span,
+        expected: Ty<'tcx>,
+    },
 }

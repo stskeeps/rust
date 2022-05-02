@@ -1,5 +1,7 @@
 #![feature(let_chains)]
+#![feature(once_cell)]
 #![feature(path_try_exists)]
+#![feature(type_alias_impl_trait)]
 
 use fluent_bundle::FluentResource;
 use fluent_syntax::parser::ParserError;
@@ -11,8 +13,13 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{instrument, trace};
+
+#[cfg(not(parallel_compiler))]
+use std::lazy::Lazy;
+#[cfg(parallel_compiler)]
+use std::lazy::SyncLazy as Lazy;
 
 #[cfg(parallel_compiler)]
 use intl_memoizer::concurrent::IntlLangMemoizer;
@@ -22,7 +29,8 @@ use intl_memoizer::IntlLangMemoizer;
 pub use fluent_bundle::{FluentArgs, FluentError, FluentValue};
 pub use unic_langid::{langid, LanguageIdentifier};
 
-static FALLBACK_FLUENT_RESOURCE: &'static str = include_str!("../locales/en-US/diagnostics.ftl");
+pub static DEFAULT_LOCALE_RESOURCES: &'static [&'static str] =
+    &[include_str!("../locales/en-US/typeck.ftl"), include_str!("../locales/en-US/parser.ftl")];
 
 pub type FluentBundle = fluent_bundle::bundle::FluentBundle<FluentResource, IntlLangMemoizer>;
 
@@ -45,7 +53,7 @@ pub enum TranslationBundleError {
     /// Failed to add `FluentResource` to `FluentBundle`.
     AddResource(FluentError),
     /// `$sysroot/share/locale/$locale` does not exist.
-    MissingLocale(io::Error),
+    MissingLocale,
     /// Cannot read directory entries of `$sysroot/share/locale/$locale`.
     ReadLocalesDir(io::Error),
     /// Cannot read directory entry of `$sysroot/share/locale/$locale`.
@@ -62,9 +70,7 @@ impl fmt::Display for TranslationBundleError {
                 write!(f, "could not parse ftl file: {}", e)
             }
             TranslationBundleError::AddResource(e) => write!(f, "failed to add resource: {}", e),
-            TranslationBundleError::MissingLocale(e) => {
-                write!(f, "missing locale directory: {}", e)
-            }
+            TranslationBundleError::MissingLocale => write!(f, "missing locale directory"),
             TranslationBundleError::ReadLocalesDir(e) => {
                 write!(f, "could not read locales dir: {}", e)
             }
@@ -84,7 +90,7 @@ impl Error for TranslationBundleError {
             TranslationBundleError::ReadFtl(e) => Some(e),
             TranslationBundleError::ParseFtl(e) => Some(e),
             TranslationBundleError::AddResource(e) => Some(e),
-            TranslationBundleError::MissingLocale(e) => Some(e),
+            TranslationBundleError::MissingLocale => None,
             TranslationBundleError::ReadLocalesDir(e) => Some(e),
             TranslationBundleError::ReadLocalesDirEntry(e) => Some(e),
             TranslationBundleError::LocaleIsNotDir => None,
@@ -113,7 +119,8 @@ impl From<Vec<FluentError>> for TranslationBundleError {
 /// (overriding any conflicting messages).
 #[instrument(level = "trace")]
 pub fn fluent_bundle(
-    sysroot: &Path,
+    mut user_provided_sysroot: Option<PathBuf>,
+    mut sysroot_candidates: Vec<PathBuf>,
     requested_locale: Option<LanguageIdentifier>,
     additional_ftl_path: Option<&Path>,
     with_directionality_markers: bool,
@@ -140,33 +147,43 @@ pub fn fluent_bundle(
 
     // If the user requests the default locale then don't try to load anything.
     if !requested_fallback_locale && let Some(requested_locale) = requested_locale {
-        let mut sysroot = sysroot.to_path_buf();
-        sysroot.push("share");
-        sysroot.push("locale");
-        sysroot.push(requested_locale.to_string());
-        trace!(?sysroot);
+        let mut found_resources = false;
+        for sysroot in user_provided_sysroot.iter_mut().chain(sysroot_candidates.iter_mut()) {
+            sysroot.push("share");
+            sysroot.push("locale");
+            sysroot.push(requested_locale.to_string());
+            trace!(?sysroot);
 
-        let _ = sysroot.try_exists().map_err(TranslationBundleError::MissingLocale)?;
-
-        if !sysroot.is_dir() {
-            return Err(TranslationBundleError::LocaleIsNotDir);
-        }
-
-        for entry in sysroot.read_dir().map_err(TranslationBundleError::ReadLocalesDir)? {
-            let entry = entry.map_err(TranslationBundleError::ReadLocalesDirEntry)?;
-            let path = entry.path();
-            trace!(?path);
-            if path.extension().and_then(|s| s.to_str()) != Some("ftl") {
+            if !sysroot.exists() {
                 trace!("skipping");
                 continue;
             }
 
-            let resource_str =
-                fs::read_to_string(path).map_err(TranslationBundleError::ReadFtl)?;
-            let resource =
-                FluentResource::try_new(resource_str).map_err(TranslationBundleError::from)?;
-            trace!(?resource);
-            bundle.add_resource(resource).map_err(TranslationBundleError::from)?;
+            if !sysroot.is_dir() {
+                return Err(TranslationBundleError::LocaleIsNotDir);
+            }
+
+            for entry in sysroot.read_dir().map_err(TranslationBundleError::ReadLocalesDir)? {
+                let entry = entry.map_err(TranslationBundleError::ReadLocalesDirEntry)?;
+                let path = entry.path();
+                trace!(?path);
+                if path.extension().and_then(|s| s.to_str()) != Some("ftl") {
+                    trace!("skipping");
+                    continue;
+                }
+
+                let resource_str =
+                    fs::read_to_string(path).map_err(TranslationBundleError::ReadFtl)?;
+                let resource =
+                    FluentResource::try_new(resource_str).map_err(TranslationBundleError::from)?;
+                trace!(?resource);
+                bundle.add_resource(resource).map_err(TranslationBundleError::from)?;
+                found_resources = true;
+            }
+        }
+
+        if !found_resources {
+            return Err(TranslationBundleError::MissingLocale);
         }
     }
 
@@ -183,20 +200,30 @@ pub fn fluent_bundle(
     Ok(Some(bundle))
 }
 
+/// Type alias for the result of `fallback_fluent_bundle` - a reference-counted pointer to a lazily
+/// evaluated fluent bundle.
+pub type LazyFallbackBundle = Lrc<Lazy<FluentBundle, impl FnOnce() -> FluentBundle>>;
+
 /// Return the default `FluentBundle` with standard "en-US" diagnostic messages.
 #[instrument(level = "trace")]
 pub fn fallback_fluent_bundle(
+    resources: &'static [&'static str],
     with_directionality_markers: bool,
-) -> Result<Lrc<FluentBundle>, TranslationBundleError> {
-    let fallback_resource = FluentResource::try_new(FALLBACK_FLUENT_RESOURCE.to_string())
-        .map_err(TranslationBundleError::from)?;
-    trace!(?fallback_resource);
-    let mut fallback_bundle = new_bundle(vec![langid!("en-US")]);
-    // See comment in `fluent_bundle`.
-    fallback_bundle.set_use_isolating(with_directionality_markers);
-    fallback_bundle.add_resource(fallback_resource).map_err(TranslationBundleError::from)?;
-    let fallback_bundle = Lrc::new(fallback_bundle);
-    Ok(fallback_bundle)
+) -> LazyFallbackBundle {
+    Lrc::new(Lazy::new(move || {
+        let mut fallback_bundle = new_bundle(vec![langid!("en-US")]);
+        // See comment in `fluent_bundle`.
+        fallback_bundle.set_use_isolating(with_directionality_markers);
+
+        for resource in resources {
+            let resource = FluentResource::try_new(resource.to_string())
+                .expect("failed to parse fallback fluent resource");
+            trace!(?resource);
+            fallback_bundle.add_resource_overriding(resource);
+        }
+
+        fallback_bundle
+    }))
 }
 
 /// Identifier for the Fluent message/attribute corresponding to a diagnostic message.
@@ -311,18 +338,12 @@ impl MultiSpan {
 
     /// Returns `true` if any of the primary spans are displayable.
     pub fn has_primary_spans(&self) -> bool {
-        self.primary_spans.iter().any(|sp| !sp.is_dummy())
+        !self.is_dummy()
     }
 
     /// Returns `true` if this contains only a dummy primary span with any hygienic context.
     pub fn is_dummy(&self) -> bool {
-        let mut is_dummy = true;
-        for span in &self.primary_spans {
-            if !span.is_dummy() {
-                is_dummy = false;
-            }
-        }
-        is_dummy
+        self.primary_spans.iter().all(|sp| sp.is_dummy())
     }
 
     /// Replaces all occurrences of one Span with another. Used to move `Span`s in areas that don't

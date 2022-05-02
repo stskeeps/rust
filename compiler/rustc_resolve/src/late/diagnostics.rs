@@ -1,8 +1,9 @@
 use crate::diagnostics::{ImportSuggestion, LabelSuggestion, TypoSuggestion};
 use crate::late::lifetimes::{ElisionFailureInfo, LifetimeContext};
 use crate::late::{AliasPossibility, LateResolutionVisitor, RibKind};
+use crate::late::{LifetimeBinderKind, LifetimeRibKind};
 use crate::path_names_to_string;
-use crate::{Finalize, Module, ModuleKind, ModuleOrUniformRoot};
+use crate::{Module, ModuleKind, ModuleOrUniformRoot};
 use crate::{PathResult, PathSource, Segment};
 
 use rustc_ast::visit::FnKind;
@@ -19,7 +20,7 @@ use rustc_errors::{
 use rustc_hir as hir;
 use rustc_hir::def::Namespace::{self, *};
 use rustc_hir::def::{self, CtorKind, CtorOf, DefKind};
-use rustc_hir::def_id::{DefId, CRATE_DEF_INDEX, LOCAL_CRATE};
+use rustc_hir::def_id::{DefId, CRATE_DEF_ID, LOCAL_CRATE};
 use rustc_hir::PrimTy;
 use rustc_session::parse::feature_err;
 use rustc_span::edition::Edition;
@@ -85,7 +86,7 @@ impl ForLifetimeSpanType {
     }
 }
 
-impl<'tcx> Into<MissingLifetimeSpot<'tcx>> for &'tcx hir::Generics<'tcx> {
+impl<'tcx> Into<MissingLifetimeSpot<'tcx>> for &&'tcx hir::Generics<'tcx> {
     fn into(self) -> MissingLifetimeSpot<'tcx> {
         MissingLifetimeSpot::Generics(self)
     }
@@ -188,7 +189,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 (String::new(), "the crate root".to_string())
             } else {
                 let mod_path = &path[..path.len() - 1];
-                let mod_prefix = match self.resolve_path(mod_path, Some(TypeNS), Finalize::No) {
+                let mod_prefix = match self.resolve_path(mod_path, Some(TypeNS), None) {
                     PathResult::Module(ModuleOrUniformRoot::Module(module)) => module.res(),
                     _ => None,
                 }
@@ -351,7 +352,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 }
             })
             .collect::<Vec<_>>();
-        let crate_def_id = DefId::local(CRATE_DEF_INDEX);
+        let crate_def_id = CRATE_DEF_ID.to_def_id();
         if candidates.is_empty() && is_expected(Res::Def(DefKind::Enum, crate_def_id)) {
             let mut enum_candidates: Vec<_> = self
                 .r
@@ -647,7 +648,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         if let crate::PathSource::TraitItem(_) = source {
             let mod_path = &path[..path.len() - 1];
             if let PathResult::Module(ModuleOrUniformRoot::Module(module)) =
-                self.resolve_path(mod_path, None, Finalize::No)
+                self.resolve_path(mod_path, None, None)
             {
                 let resolutions = self.r.resolutions(module).borrow();
                 let targets: Vec<_> =
@@ -1182,9 +1183,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         ident: Symbol,
         kind: &AssocItemKind,
     ) -> Option<Symbol> {
-        let Some((module, _)) = &self.current_trait_ref else {
-            return None;
-        };
+        let (module, _) = self.current_trait_ref.as_ref()?;
         if ident == kw::Underscore {
             // We do nothing for `_`.
             return None;
@@ -1271,12 +1270,11 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
 
         // Look for associated items in the current trait.
         if let Some((module, _)) = self.current_trait_ref {
-            if let Ok(binding) = self.r.resolve_ident_in_module(
+            if let Ok(binding) = self.r.maybe_resolve_ident_in_module(
                 ModuleOrUniformRoot::Module(module),
                 ident,
                 ns,
                 &self.parent_scope,
-                None,
             ) {
                 let res = binding.res();
                 if filter_fn(res) {
@@ -1332,10 +1330,8 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                             names.extend(extern_prelude.iter().flat_map(|(ident, _)| {
                                 self.r.crate_loader.maybe_process_path_extern(ident.name).and_then(
                                     |crate_id| {
-                                        let crate_mod = Res::Def(
-                                            DefKind::Mod,
-                                            DefId { krate: crate_id, index: CRATE_DEF_INDEX },
-                                        );
+                                        let crate_mod =
+                                            Res::Def(DefKind::Mod, crate_id.as_def_id());
 
                                         if filter_fn(crate_mod) {
                                             Some(TypoSuggestion::typo_from_res(
@@ -1366,7 +1362,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
             // Search in module.
             let mod_path = &path[..path.len() - 1];
             if let PathResult::Module(ModuleOrUniformRoot::Module(module)) =
-                self.resolve_path(mod_path, Some(TypeNS), Finalize::No)
+                self.resolve_path(mod_path, Some(TypeNS), None)
             {
                 self.r.add_module_candidates(module, &mut names, &filter_fn);
             }
@@ -1794,6 +1790,133 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
             (*ident, within_scope)
         })
     }
+
+    crate fn emit_undeclared_lifetime_error(
+        &self,
+        lifetime_ref: &ast::Lifetime,
+        outer_lifetime_ref: Option<Ident>,
+    ) {
+        debug_assert_ne!(lifetime_ref.ident.name, kw::UnderscoreLifetime);
+        let mut err = if let Some(outer) = outer_lifetime_ref {
+            let mut err = struct_span_err!(
+                self.r.session,
+                lifetime_ref.ident.span,
+                E0401,
+                "can't use generic parameters from outer item",
+            );
+            err.span_label(lifetime_ref.ident.span, "use of generic parameter from outer item");
+            err.span_label(outer.span, "lifetime parameter from outer item");
+            err
+        } else {
+            let mut err = struct_span_err!(
+                self.r.session,
+                lifetime_ref.ident.span,
+                E0261,
+                "use of undeclared lifetime name `{}`",
+                lifetime_ref.ident
+            );
+            err.span_label(lifetime_ref.ident.span, "undeclared lifetime");
+            err
+        };
+        let mut suggest_note = true;
+
+        for rib in self.lifetime_ribs.iter().rev() {
+            match rib.kind {
+                LifetimeRibKind::Generics { parent: _, span, kind } => {
+                    if !span.can_be_used_for_suggestions() && suggest_note {
+                        suggest_note = false; // Avoid displaying the same help multiple times.
+                        err.span_label(
+                            span,
+                            &format!(
+                                "lifetime `{}` is missing in item created through this procedural macro",
+                                lifetime_ref.ident,
+                            ),
+                        );
+                        continue;
+                    }
+
+                    let higher_ranked = matches!(
+                        kind,
+                        LifetimeBinderKind::BareFnType
+                            | LifetimeBinderKind::PolyTrait
+                            | LifetimeBinderKind::WhereBound
+                    );
+                    let (span, sugg) = if span.is_empty() {
+                        let sugg = format!(
+                            "{}<{}>{}",
+                            if higher_ranked { "for" } else { "" },
+                            lifetime_ref.ident,
+                            if higher_ranked { " " } else { "" },
+                        );
+                        (span, sugg)
+                    } else {
+                        let span =
+                            self.r.session.source_map().span_through_char(span, '<').shrink_to_hi();
+                        let sugg = format!("{}, ", lifetime_ref.ident);
+                        (span, sugg)
+                    };
+                    if higher_ranked {
+                        err.span_suggestion(
+                            span,
+                            &format!(
+                                "consider making the {} lifetime-generic with a new `{}` lifetime",
+                                kind.descr(),
+                                lifetime_ref
+                            ),
+                            sugg,
+                            Applicability::MaybeIncorrect,
+                        );
+                        err.note_once(
+                            "for more information on higher-ranked polymorphism, visit \
+                             https://doc.rust-lang.org/nomicon/hrtb.html",
+                        );
+                    } else {
+                        err.span_suggestion(
+                            span,
+                            &format!("consider introducing lifetime `{}` here", lifetime_ref.ident),
+                            sugg,
+                            Applicability::MaybeIncorrect,
+                        );
+                    }
+                }
+                LifetimeRibKind::Item => break,
+                _ => {}
+            }
+        }
+
+        err.emit();
+    }
+
+    crate fn emit_non_static_lt_in_const_generic_error(&self, lifetime_ref: &ast::Lifetime) {
+        struct_span_err!(
+            self.r.session,
+            lifetime_ref.ident.span,
+            E0771,
+            "use of non-static lifetime `{}` in const generic",
+            lifetime_ref.ident
+        )
+        .note(
+            "for more information, see issue #74052 \
+            <https://github.com/rust-lang/rust/issues/74052>",
+        )
+        .emit();
+    }
+
+    /// Non-static lifetimes are prohibited in anonymous constants under `min_const_generics`.
+    /// This function will emit an error if `generic_const_exprs` is not enabled, the body identified by
+    /// `body_id` is an anonymous constant and `lifetime_ref` is non-static.
+    crate fn maybe_emit_forbidden_non_static_lifetime_error(&self, lifetime_ref: &ast::Lifetime) {
+        let feature_active = self.r.session.features_untracked().generic_const_exprs;
+        if !feature_active {
+            feature_err(
+                &self.r.session.parse_sess,
+                sym::generic_const_exprs,
+                lifetime_ref.ident.span,
+                "a non-static lifetime is not allowed in a `const`",
+            )
+            .emit();
+        }
+    }
 }
 
 impl<'tcx> LifetimeContext<'_, 'tcx> {
@@ -1811,72 +1934,10 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
         )
     }
 
-    crate fn emit_undeclared_lifetime_error(&self, lifetime_ref: &hir::Lifetime) {
-        let mut err = struct_span_err!(
-            self.tcx.sess,
-            lifetime_ref.span,
-            E0261,
-            "use of undeclared lifetime name `{}`",
-            lifetime_ref
-        );
-        err.span_label(lifetime_ref.span, "undeclared lifetime");
-        let mut suggested_spans = vec![];
-        for missing in &self.missing_named_lifetime_spots {
-            match missing {
-                MissingLifetimeSpot::Generics(generics) => {
-                    let (span, sugg) = if let Some(param) = generics.params.iter().find(|p| {
-                        !matches!(
-                            p.kind,
-                            hir::GenericParamKind::Type { synthetic: true, .. }
-                                | hir::GenericParamKind::Lifetime {
-                                    kind: hir::LifetimeParamKind::Elided,
-                                }
-                        )
-                    }) {
-                        (param.span.shrink_to_lo(), format!("{}, ", lifetime_ref))
-                    } else {
-                        (generics.span, format!("<{}>", lifetime_ref))
-                    };
-                    if suggested_spans.contains(&span) {
-                        continue;
-                    }
-                    suggested_spans.push(span);
-                    if span.can_be_used_for_suggestions() {
-                        err.span_suggestion(
-                            span,
-                            &format!("consider introducing lifetime `{}` here", lifetime_ref),
-                            sugg,
-                            Applicability::MaybeIncorrect,
-                        );
-                    }
-                }
-                MissingLifetimeSpot::HigherRanked { span, span_type } => {
-                    err.span_suggestion(
-                        *span,
-                        &format!(
-                            "consider making the {} lifetime-generic with a new `{}` lifetime",
-                            span_type.descr(),
-                            lifetime_ref
-                        ),
-                        span_type.suggestion(&lifetime_ref.to_string()),
-                        Applicability::MaybeIncorrect,
-                    );
-                    err.note(
-                        "for more information on higher-ranked polymorphism, visit \
-                         https://doc.rust-lang.org/nomicon/hrtb.html",
-                    );
-                }
-                _ => {}
-            }
-        }
-        err.emit();
-    }
-
     /// Returns whether to add `'static` lifetime to the suggested lifetime list.
     crate fn report_elision_failure(
         &mut self,
-        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
-        db: &mut Diagnostic,
+        diag: &mut Diagnostic,
         params: &[ElisionFailureInfo],
     ) -> bool {
         let mut m = String::new();
@@ -1891,7 +1952,7 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
             let ElisionFailureInfo { parent, index, lifetime_count: n, have_bound_regions, span } =
                 info;
 
-            db.span_label(span, "");
+            diag.span_label(span, "");
             let help_name = if let Some(ident) =
                 parent.and_then(|body| self.tcx.hir().body(body).params[index].pat.simple_ident())
             {
@@ -1923,83 +1984,33 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
         }
 
         if len == 0 {
-            db.help(
+            diag.help(
                 "this function's return type contains a borrowed value, \
                  but there is no value for it to be borrowed from",
             );
             true
         } else if elided_len == 0 {
-            db.help(
+            diag.help(
                 "this function's return type contains a borrowed value with \
                  an elided lifetime, but the lifetime cannot be derived from \
                  the arguments",
             );
             true
         } else if elided_len == 1 {
-            db.help(&format!(
+            diag.help(&format!(
                 "this function's return type contains a borrowed value, \
                  but the signature does not say which {} it is borrowed from",
                 m
             ));
             false
         } else {
-            db.help(&format!(
+            diag.help(&format!(
                 "this function's return type contains a borrowed value, \
                  but the signature does not say whether it is borrowed from {}",
                 m
             ));
             false
         }
-    }
-
-    crate fn report_elided_lifetime_in_ty(&self, lifetime_refs: &[&hir::Lifetime]) {
-        let Some(missing_lifetime) = lifetime_refs.iter().find(|lt| {
-            lt.name == hir::LifetimeName::Implicit(true)
-        }) else { return };
-
-        let mut spans: Vec<_> = lifetime_refs.iter().map(|lt| lt.span).collect();
-        spans.sort();
-        let mut spans_dedup = spans.clone();
-        spans_dedup.dedup();
-        let spans_with_counts: Vec<_> = spans_dedup
-            .into_iter()
-            .map(|sp| (sp, spans.iter().filter(|nsp| *nsp == &sp).count()))
-            .collect();
-
-        self.tcx.struct_span_lint_hir(
-            rustc_session::lint::builtin::ELIDED_LIFETIMES_IN_PATHS,
-            missing_lifetime.hir_id,
-            spans,
-            |lint| {
-                let mut db = lint.build("hidden lifetime parameters in types are deprecated");
-                self.add_missing_lifetime_specifiers_label(
-                    &mut db,
-                    spans_with_counts,
-                    &FxHashSet::from_iter([kw::UnderscoreLifetime]),
-                    Vec::new(),
-                    &[],
-                );
-                db.emit();
-            },
-        );
-    }
-
-    // FIXME(const_generics): This patches over an ICE caused by non-'static lifetimes in const
-    // generics. We are disallowing this until we can decide on how we want to handle non-'static
-    // lifetimes in const generics. See issue #74052 for discussion.
-    crate fn emit_non_static_lt_in_const_generic_error(&self, lifetime_ref: &hir::Lifetime) {
-        let mut err = struct_span_err!(
-            self.tcx.sess,
-            lifetime_ref.span,
-            E0771,
-            "use of non-static lifetime `{}` in const generic",
-            lifetime_ref
-        );
-        err.note(
-            "for more information, see issue #74052 \
-            <https://github.com/rust-lang/rust/issues/74052>",
-        );
-        err.emit();
     }
 
     crate fn is_trait_ref_fn_scope(&mut self, trait_ref: &'tcx hir::PolyTraitRef<'tcx>) -> bool {
@@ -2401,36 +2412,6 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
                 }
             }
             _ => unreachable!(),
-        }
-    }
-
-    /// Non-static lifetimes are prohibited in anonymous constants under `min_const_generics`.
-    /// This function will emit an error if `generic_const_exprs` is not enabled, the body identified by
-    /// `body_id` is an anonymous constant and `lifetime_ref` is non-static.
-    crate fn maybe_emit_forbidden_non_static_lifetime_error(
-        &self,
-        body_id: hir::BodyId,
-        lifetime_ref: &'tcx hir::Lifetime,
-    ) {
-        let is_anon_const = matches!(
-            self.tcx.def_kind(self.tcx.hir().body_owner_def_id(body_id)),
-            hir::def::DefKind::AnonConst
-        );
-        let is_allowed_lifetime = matches!(
-            lifetime_ref.name,
-            hir::LifetimeName::Implicit(_)
-                | hir::LifetimeName::Static
-                | hir::LifetimeName::Underscore
-        );
-
-        if !self.tcx.lazy_normalization() && is_anon_const && !is_allowed_lifetime {
-            feature_err(
-                &self.tcx.sess.parse_sess,
-                sym::generic_const_exprs,
-                lifetime_ref.span,
-                "a non-static lifetime is not allowed in a `const`",
-            )
-            .emit();
         }
     }
 }

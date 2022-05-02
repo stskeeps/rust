@@ -561,8 +561,7 @@ fn write_scope_tree(
         }
         indented_decl.push(';');
 
-        let local_name =
-            if local == RETURN_PLACE { " return place".to_string() } else { String::new() };
+        let local_name = if local == RETURN_PLACE { " return place" } else { "" };
 
         writeln!(
             w,
@@ -852,6 +851,7 @@ fn write_allocation_bytes<'tcx, Tag: Provenance, Extra>(
         }
         if let Some(&tag) = alloc.relocations().get(&i) {
             // Memory with a relocation must be defined
+            assert!(alloc.init_mask().is_range_initialized(i, i + ptr_size).is_ok());
             let j = i.bytes_usize();
             let offset = alloc
                 .inspect_with_uninit_and_ptr_outside_interpreter(j..j + ptr_size.bytes_usize());

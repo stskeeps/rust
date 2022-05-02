@@ -4,6 +4,7 @@ use crate::rmeta::*;
 
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
+use rustc_data_structures::iter_from_generator;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::{join, par_iter, Lrc, ParallelIterator};
 use rustc_hir as hir;
@@ -21,7 +22,7 @@ use rustc_index::vec::Idx;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols::{
-    metadata_symbol_name, ExportedSymbol, SymbolExportLevel,
+    metadata_symbol_name, ExportedSymbol, SymbolExportInfo,
 };
 use rustc_middle::mir::interpret;
 use rustc_middle::thir;
@@ -147,8 +148,7 @@ impl<'a, 'tcx, T: Encodable<EncodeContext<'a, 'tcx>>> Encodable<EncodeContext<'a
     }
 }
 
-impl<'a, 'tcx, I: Idx, T: Encodable<EncodeContext<'a, 'tcx>>> Encodable<EncodeContext<'a, 'tcx>>
-    for Lazy<Table<I, T>>
+impl<'a, 'tcx, I: Idx, T> Encodable<EncodeContext<'a, 'tcx>> for Lazy<Table<I, T>>
 where
     Option<T>: FixedSizeEncoding,
 {
@@ -461,16 +461,15 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 .chain(self.tcx.resolutions(()).proc_macros.iter().map(|p| p.local_def_index))
             {
                 let def_key = self.lazy(table.def_key(def_index));
-                let def_path_hash = self.lazy(table.def_path_hash(def_index));
+                let def_path_hash = table.def_path_hash(def_index);
                 self.tables.def_keys.set(def_index, def_key);
                 self.tables.def_path_hashes.set(def_index, def_path_hash);
             }
         } else {
             for (def_index, def_key, def_path_hash) in table.enumerated_keys_and_path_hashes() {
                 let def_key = self.lazy(def_key);
-                let def_path_hash = self.lazy(def_path_hash);
                 self.tables.def_keys.set(def_index, def_key);
-                self.tables.def_path_hashes.set(def_index, def_path_hash);
+                self.tables.def_path_hashes.set(def_index, *def_path_hash);
             }
         }
     }
@@ -978,6 +977,14 @@ fn should_encode_generics(def_kind: DefKind) -> bool {
 }
 
 impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
+    fn encode_attrs(&mut self, def_id: DefId) {
+        let attrs = self.tcx.get_attrs(def_id);
+        record!(self.tables.attributes[def_id] <- attrs);
+        if attrs.iter().any(|attr| attr.may_have_doc_links()) {
+            self.tables.may_have_doc_links.set(def_id.index, ());
+        }
+    }
+
     fn encode_def_ids(&mut self) {
         if self.is_proc_macro {
             return;
@@ -988,9 +995,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             let def_id = local_id.to_def_id();
             let def_kind = tcx.opt_def_kind(local_id);
             let Some(def_kind) = def_kind else { continue };
-            record!(self.tables.opt_def_kind[def_id] <- def_kind);
+            self.tables.opt_def_kind.set(def_id.index, def_kind);
             record!(self.tables.def_span[def_id] <- tcx.def_span(def_id));
-            record!(self.tables.attributes[def_id] <- tcx.get_attrs(def_id));
+            self.encode_attrs(def_id);
             record!(self.tables.expn_that_defined[def_id] <- self.tcx.expn_that_defined(def_id));
             if should_encode_visibility(def_kind) {
                 record!(self.tables.visibility[def_id] <- self.tcx.visibility(def_id));
@@ -1048,7 +1055,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         };
 
         record!(self.tables.kind[def_id] <- EntryKind::Variant(self.lazy(data)));
-        record!(self.tables.impl_constness[def_id] <- hir::Constness::Const);
+        self.tables.impl_constness.set(def_id.index, hir::Constness::Const);
         record!(self.tables.children[def_id] <- variant.fields.iter().map(|f| {
             assert!(f.did.is_local());
             f.did.index
@@ -1078,7 +1085,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         };
 
         record!(self.tables.kind[def_id] <- EntryKind::Variant(self.lazy(data)));
-        record!(self.tables.impl_constness[def_id] <- hir::Constness::Const);
+        self.tables.impl_constness.set(def_id.index, hir::Constness::Const);
         self.encode_item_type(def_id);
         if variant.ctor_kind == CtorKind::Fn {
             record!(self.tables.fn_sig[def_id] <- tcx.fn_sig(def_id));
@@ -1109,21 +1116,26 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             // Encode this here because we don't do it in encode_def_ids.
             record!(self.tables.expn_that_defined[def_id] <- tcx.expn_that_defined(local_def_id));
         } else {
-            let direct_children = md.item_ids.iter().map(|item_id| item_id.def_id.local_def_index);
-            // Foreign items are planted into their parent modules from name resolution point of view.
-            let tcx = self.tcx;
-            let foreign_item_children = md
-                .item_ids
-                .iter()
-                .filter_map(|item_id| match tcx.hir().item(*item_id).kind {
-                    hir::ItemKind::ForeignMod { items, .. } => {
-                        Some(items.iter().map(|fi_ref| fi_ref.id.def_id.local_def_index))
+            record!(self.tables.children[def_id] <- iter_from_generator(|| {
+                for item_id in md.item_ids {
+                    match tcx.hir().item(*item_id).kind {
+                        // Foreign items are planted into their parent modules
+                        // from name resolution point of view.
+                        hir::ItemKind::ForeignMod { items, .. } => {
+                            for foreign_item in items {
+                                yield foreign_item.id.def_id.local_def_index;
+                            }
+                        }
+                        // Only encode named non-reexport children, reexports are encoded
+                        // separately and unnamed items are not used by name resolution.
+                        hir::ItemKind::ExternCrate(..) => continue,
+                        _ if tcx.def_key(item_id.def_id.to_def_id()).get_opt_name().is_some() => {
+                            yield item_id.def_id.local_def_index;
+                        }
+                        _ => continue,
                     }
-                    _ => None,
-                })
-                .flatten();
-
-            record!(self.tables.children[def_id] <- direct_children.chain(foreign_item_children));
+                }
+            }));
         }
     }
 
@@ -1157,7 +1169,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         };
 
         record!(self.tables.repr_options[def_id] <- adt_def.repr());
-        record!(self.tables.impl_constness[def_id] <- hir::Constness::Const);
+        self.tables.impl_constness.set(def_id.index, hir::Constness::Const);
         record!(self.tables.kind[def_id] <- EntryKind::Struct(self.lazy(data)));
         self.encode_item_type(def_id);
         if variant.ctor_kind == CtorKind::Fn {
@@ -1207,8 +1219,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                         record!(self.tables.fn_arg_names[def_id] <- self.tcx.hir().body_param_names(body))
                     }
                 };
-                record!(self.tables.asyncness[def_id] <- m_sig.header.asyncness);
-                record!(self.tables.impl_constness[def_id] <- hir::Constness::NotConst);
+                self.tables.asyncness.set(def_id.index, m_sig.header.asyncness);
+                self.tables.impl_constness.set(def_id.index, hir::Constness::NotConst);
                 record!(self.tables.kind[def_id] <- EntryKind::AssocFn(self.lazy(AssocFnData {
                     container,
                     has_self: trait_item.fn_has_self_parameter,
@@ -1265,7 +1277,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
             ty::AssocKind::Fn => {
                 let hir::ImplItemKind::Fn(ref sig, body) = ast_item.kind else { bug!() };
-                record!(self.tables.asyncness[def_id] <- sig.header.asyncness);
+                self.tables.asyncness.set(def_id.index, sig.header.asyncness);
                 record!(self.tables.fn_arg_names[def_id] <- self.tcx.hir().body_param_names(body));
                 // Can be inside `impl const Trait`, so using sig.header.constness is not reliable
                 let constness = if self.tcx.is_const_fn_raw(def_id) {
@@ -1273,7 +1285,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 } else {
                     hir::Constness::NotConst
                 };
-                record!(self.tables.impl_constness[def_id] <- constness);
+                self.tables.impl_constness.set(def_id.index, constness);
                 record!(self.tables.kind[def_id] <- EntryKind::AssocFn(self.lazy(AssocFnData {
                     container,
                     has_self: impl_item.fn_has_self_parameter,
@@ -1286,7 +1298,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         self.encode_ident_span(def_id, impl_item.ident(self.tcx));
         self.encode_item_type(def_id);
         if let Some(trait_item_def_id) = impl_item.trait_item_def_id {
-            record!(self.tables.trait_item_def_id[def_id] <- trait_item_def_id);
+            self.tables.trait_item_def_id.set(def_id.index, trait_item_def_id.into());
         }
         if impl_item.kind == ty::AssocKind::Fn {
             record!(self.tables.fn_sig[def_id] <- tcx.fn_sig(def_id));
@@ -1394,9 +1406,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 EntryKind::Const
             }
             hir::ItemKind::Fn(ref sig, .., body) => {
-                record!(self.tables.asyncness[def_id] <- sig.header.asyncness);
+                self.tables.asyncness.set(def_id.index, sig.header.asyncness);
                 record!(self.tables.fn_arg_names[def_id] <- self.tcx.hir().body_param_names(body));
-                record!(self.tables.impl_constness[def_id] <- sig.header.constness);
+                self.tables.impl_constness.set(def_id.index, sig.header.constness);
                 EntryKind::Fn
             }
             hir::ItemKind::Macro(ref macro_def, _) => {
@@ -1420,7 +1432,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             hir::ItemKind::Struct(ref struct_def, _) => {
                 let adt_def = self.tcx.adt_def(def_id);
                 record!(self.tables.repr_options[def_id] <- adt_def.repr());
-                record!(self.tables.impl_constness[def_id] <- hir::Constness::Const);
+                self.tables.impl_constness.set(def_id.index, hir::Constness::Const);
 
                 // Encode def_ids for each field and method
                 // for methods, write all the stuff get_trait_method
@@ -1450,15 +1462,15 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 }))
             }
             hir::ItemKind::Impl(hir::Impl { defaultness, constness, .. }) => {
-                record!(self.tables.impl_defaultness[def_id] <- defaultness);
-                record!(self.tables.impl_constness[def_id] <- constness);
+                self.tables.impl_defaultness.set(def_id.index, *defaultness);
+                self.tables.impl_constness.set(def_id.index, *constness);
 
                 let trait_ref = self.tcx.impl_trait_ref(def_id);
                 if let Some(trait_ref) = trait_ref {
                     let trait_def = self.tcx.trait_def(trait_ref.def_id);
                     if let Some(mut an) = trait_def.ancestors(self.tcx, def_id).ok() {
                         if let Some(specialization_graph::Node::Impl(parent)) = an.nth(1) {
-                            record!(self.tables.impl_parent[def_id] <- parent);
+                            self.tables.impl_parent.set(def_id.index, parent.into());
                         }
                     }
 
@@ -1472,7 +1484,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 }
 
                 let polarity = self.tcx.impl_polarity(def_id);
-                record!(self.tables.impl_polarity[def_id] <- polarity);
+                self.tables.impl_polarity.set(def_id.index, polarity);
 
                 EntryKind::Impl
             }
@@ -1552,16 +1564,17 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
     fn encode_info_for_closure(&mut self, hir_id: hir::HirId) {
         let def_id = self.tcx.hir().local_def_id(hir_id);
         debug!("EncodeContext::encode_info_for_closure({:?})", def_id);
-
         // NOTE(eddyb) `tcx.type_of(def_id)` isn't used because it's fully generic,
         // including on the signature, which is inferred in `typeck.
-        let ty = self.tcx.typeck(def_id).node_type(hir_id);
-
+        let typeck_result: &'tcx ty::TypeckResults<'tcx> = self.tcx.typeck(def_id);
+        let ty = typeck_result.node_type(hir_id);
         match ty.kind() {
             ty::Generator(..) => {
                 let data = self.tcx.generator_kind(def_id).unwrap();
+                let generator_diagnostic_data = typeck_result.get_generator_diagnostic_data();
                 record!(self.tables.kind[def_id.to_def_id()] <- EntryKind::Generator);
                 record!(self.tables.generator_kind[def_id.to_def_id()] <- data);
+                record!(self.tables.generator_diagnostic_data[def_id.to_def_id()]  <- generator_diagnostic_data);
             }
 
             ty::Closure(..) => {
@@ -1635,7 +1648,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             let hir = tcx.hir();
 
             let proc_macro_decls_static = tcx.proc_macro_decls_static(()).unwrap().local_def_index;
-            let stability = tcx.lookup_stability(DefId::local(CRATE_DEF_INDEX));
+            let stability = tcx.lookup_stability(CRATE_DEF_ID);
             let macros =
                 self.lazy(tcx.resolutions(()).proc_macros.iter().map(|p| p.local_def_index));
             let spans = self.tcx.sess.parse_sess.proc_macro_quoted_spans();
@@ -1644,9 +1657,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 self.tables.proc_macro_quoted_spans.set(i, span);
             }
 
-            record!(self.tables.opt_def_kind[LOCAL_CRATE.as_def_id()] <- DefKind::Mod);
+            self.tables.opt_def_kind.set(LOCAL_CRATE.as_def_id().index, DefKind::Mod);
             record!(self.tables.def_span[LOCAL_CRATE.as_def_id()] <- tcx.def_span(LOCAL_CRATE.as_def_id()));
-            record!(self.tables.attributes[LOCAL_CRATE.as_def_id()] <- tcx.get_attrs(LOCAL_CRATE.as_def_id()));
+            self.encode_attrs(LOCAL_CRATE.as_def_id());
             record!(self.tables.visibility[LOCAL_CRATE.as_def_id()] <- tcx.visibility(LOCAL_CRATE.as_def_id()));
             if let Some(stability) = stability {
                 record!(self.tables.lookup_stability[LOCAL_CRATE.as_def_id()] <- stability);
@@ -1685,9 +1698,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 def_key.disambiguated_data.data = DefPathData::MacroNs(name);
 
                 let def_id = id.to_def_id();
-                record!(self.tables.opt_def_kind[def_id] <- DefKind::Macro(macro_kind));
+                self.tables.opt_def_kind.set(def_id.index, DefKind::Macro(macro_kind));
                 record!(self.tables.kind[def_id] <- EntryKind::ProcMacro(macro_kind));
-                record!(self.tables.attributes[def_id] <- attrs);
+                self.encode_attrs(def_id);
                 record!(self.tables.def_keys[def_id] <- def_key);
                 record!(self.tables.def_ident_span[def_id] <- span);
                 record!(self.tables.def_span[def_id] <- span);
@@ -1783,10 +1796,27 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         debug!("EncodeContext::encode_traits_and_impls()");
         empty_proc_macro!(self);
         let tcx = self.tcx;
-        let mut visitor = ImplsVisitor { tcx, impls: FxHashMap::default() };
-        tcx.hir().visit_all_item_likes(&mut visitor);
+        let mut fx_hash_map: FxHashMap<DefId, Vec<(DefIndex, Option<SimplifiedType>)>> =
+            FxHashMap::default();
 
-        let mut all_impls: Vec<_> = visitor.impls.into_iter().collect();
+        for id in tcx.hir().items() {
+            if matches!(tcx.hir().def_kind(id.def_id), DefKind::Impl) {
+                if let Some(trait_ref) = tcx.impl_trait_ref(id.def_id.to_def_id()) {
+                    let simplified_self_ty = fast_reject::simplify_type(
+                        self.tcx,
+                        trait_ref.self_ty(),
+                        TreatParams::AsPlaceholders,
+                    );
+
+                    fx_hash_map
+                        .entry(trait_ref.def_id)
+                        .or_default()
+                        .push((id.def_id.local_def_index, simplified_self_ty));
+                }
+            }
+        }
+
+        let mut all_impls: Vec<_> = fx_hash_map.into_iter().collect();
 
         // Bring everything into deterministic order for hashing
         all_impls.sort_by_cached_key(|&(trait_def_id, _)| tcx.def_path_hash(trait_def_id));
@@ -1844,8 +1874,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
     // definition (as that's not defined in this crate).
     fn encode_exported_symbols(
         &mut self,
-        exported_symbols: &[(ExportedSymbol<'tcx>, SymbolExportLevel)],
-    ) -> Lazy<[(ExportedSymbol<'tcx>, SymbolExportLevel)]> {
+        exported_symbols: &[(ExportedSymbol<'tcx>, SymbolExportInfo)],
+    ) -> Lazy<[(ExportedSymbol<'tcx>, SymbolExportInfo)]> {
         empty_proc_macro!(self);
         // The metadata symbol name is special. It should not show up in
         // downstream crates.
@@ -1886,14 +1916,14 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
         match nitem.kind {
             hir::ForeignItemKind::Fn(_, ref names, _) => {
-                record!(self.tables.asyncness[def_id] <- hir::IsAsync::NotAsync);
+                self.tables.asyncness.set(def_id.index, hir::IsAsync::NotAsync);
                 record!(self.tables.fn_arg_names[def_id] <- *names);
                 let constness = if self.tcx.is_const_fn_raw(def_id) {
                     hir::Constness::Const
                 } else {
                     hir::Constness::NotConst
                 };
-                record!(self.tables.impl_constness[def_id] <- constness);
+                self.tables.impl_constness.set(def_id.index, constness);
                 record!(self.tables.kind[def_id] <- EntryKind::ForeignFn);
             }
             hir::ForeignItemKind::Static(..) => {
@@ -2047,41 +2077,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
         }
     }
-}
-
-struct ImplsVisitor<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    impls: FxHashMap<DefId, Vec<(DefIndex, Option<SimplifiedType>)>>,
-}
-
-impl<'tcx, 'v> ItemLikeVisitor<'v> for ImplsVisitor<'tcx> {
-    fn visit_item(&mut self, item: &hir::Item<'_>) {
-        match item.kind {
-            hir::ItemKind::Impl(..) => {
-                if let Some(trait_ref) = self.tcx.impl_trait_ref(item.def_id.to_def_id()) {
-                    let simplified_self_ty = fast_reject::simplify_type(
-                        self.tcx,
-                        trait_ref.self_ty(),
-                        TreatParams::AsPlaceholders,
-                    );
-
-                    self.impls
-                        .entry(trait_ref.def_id)
-                        .or_default()
-                        .push((item.def_id.local_def_index, simplified_self_ty));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn visit_trait_item(&mut self, _trait_item: &'v hir::TraitItem<'v>) {}
-
-    fn visit_impl_item(&mut self, _impl_item: &'v hir::ImplItem<'v>) {
-        // handled in `visit_item` above
-    }
-
-    fn visit_foreign_item(&mut self, _foreign_item: &'v hir::ForeignItem<'v>) {}
 }
 
 /// Used to prefetch queries which will be needed later by metadata encoding.

@@ -36,7 +36,7 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::tagged_ptr::CopyTaggedPtr;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
-use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LocalDefIdMap, CRATE_DEF_INDEX};
+use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LocalDefIdMap};
 use rustc_hir::Node;
 use rustc_macros::HashStable;
 use rustc_query_system::ich::StableHashingContext;
@@ -67,8 +67,9 @@ pub use self::consts::{
 };
 pub use self::context::{
     tls, CanonicalUserType, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations,
-    CtxtInterners, DelaySpanBugEmitted, FreeRegionInfo, GeneratorInteriorTypeCause, GlobalCtxt,
-    Lift, OnDiskCache, TyCtxt, TypeckResults, UserType, UserTypeAnnotationIndex,
+    CtxtInterners, DelaySpanBugEmitted, FreeRegionInfo, GeneratorDiagnosticData,
+    GeneratorInteriorTypeCause, GlobalCtxt, Lift, OnDiskCache, TyCtxt, TypeckResults, UserType,
+    UserTypeAnnotationIndex,
 };
 pub use self::instance::{Instance, InstanceDef};
 pub use self::list::List;
@@ -130,6 +131,8 @@ pub struct ResolverOutputs {
     pub definitions: rustc_hir::definitions::Definitions,
     pub cstore: Box<CrateStoreDyn>,
     pub visibilities: FxHashMap<LocalDefId, Visibility>,
+    /// This field is used to decide whether we should make `PRIVATE_IN_PUBLIC` a hard error.
+    pub has_pub_restricted: bool,
     pub access_levels: AccessLevels,
     pub extern_crate_map: FxHashMap<LocalDefId, CrateNum>,
     pub maybe_unused_trait_imports: FxHashSet<LocalDefId>,
@@ -287,11 +290,28 @@ pub struct ClosureSizeProfileData<'tcx> {
 }
 
 pub trait DefIdTree: Copy {
-    fn parent(self, id: DefId) -> Option<DefId>;
+    fn opt_parent(self, id: DefId) -> Option<DefId>;
 
     #[inline]
-    fn local_parent(self, id: LocalDefId) -> Option<LocalDefId> {
-        Some(self.parent(id.to_def_id())?.expect_local())
+    #[track_caller]
+    fn parent(self, id: DefId) -> DefId {
+        match self.opt_parent(id) {
+            Some(id) => id,
+            // not `unwrap_or_else` to avoid breaking caller tracking
+            None => bug!("{id:?} doesn't have a parent"),
+        }
+    }
+
+    #[inline]
+    #[track_caller]
+    fn opt_local_parent(self, id: LocalDefId) -> Option<LocalDefId> {
+        self.opt_parent(id.to_def_id()).map(DefId::expect_local)
+    }
+
+    #[inline]
+    #[track_caller]
+    fn local_parent(self, id: LocalDefId) -> LocalDefId {
+        self.parent(id.to_def_id()).expect_local()
     }
 
     fn is_descendant_of(self, mut descendant: DefId, ancestor: DefId) -> bool {
@@ -300,7 +320,7 @@ pub trait DefIdTree: Copy {
         }
 
         while descendant != ancestor {
-            match self.parent(descendant) {
+            match self.opt_parent(descendant) {
                 Some(parent) => descendant = parent,
                 None => return false,
             }
@@ -310,28 +330,13 @@ pub trait DefIdTree: Copy {
 }
 
 impl<'tcx> DefIdTree for TyCtxt<'tcx> {
-    fn parent(self, id: DefId) -> Option<DefId> {
+    #[inline]
+    fn opt_parent(self, id: DefId) -> Option<DefId> {
         self.def_key(id).parent.map(|index| DefId { index, ..id })
     }
 }
 
 impl Visibility {
-    pub fn from_hir(visibility: &hir::Visibility<'_>, id: hir::HirId, tcx: TyCtxt<'_>) -> Self {
-        match visibility.node {
-            hir::VisibilityKind::Public => Visibility::Public,
-            hir::VisibilityKind::Crate(_) => Visibility::Restricted(DefId::local(CRATE_DEF_INDEX)),
-            hir::VisibilityKind::Restricted { ref path, .. } => match path.res {
-                // If there is no resolution, `resolve` will have already reported an error, so
-                // assume that the visibility is public to avoid reporting more privacy errors.
-                Res::Err => Visibility::Public,
-                def => Visibility::Restricted(def.def_id()),
-            },
-            hir::VisibilityKind::Inherited => {
-                Visibility::Restricted(tcx.parent_module(id).to_def_id())
-            }
-        }
-    }
-
     /// Returns `true` if an item with this visibility is accessible from the given block.
     pub fn is_accessible_from<T: DefIdTree>(self, module: DefId, tree: T) -> bool {
         let restriction = match self {
@@ -1991,27 +1996,25 @@ impl<'tcx> TyCtxt<'tcx> {
             .filter(|item| item.kind == AssocKind::Fn && item.defaultness.has_value())
     }
 
-    fn item_name_from_hir(self, def_id: DefId) -> Option<Ident> {
-        self.hir().get_if_local(def_id).and_then(|node| node.ident())
-    }
-
-    fn item_name_from_def_id(self, def_id: DefId) -> Option<Symbol> {
-        if def_id.index == CRATE_DEF_INDEX {
-            Some(self.crate_name(def_id.krate))
+    fn opt_item_name(self, def_id: DefId) -> Option<Symbol> {
+        if let Some(cnum) = def_id.as_crate_root() {
+            Some(self.crate_name(cnum))
         } else {
             let def_key = self.def_key(def_id);
             match def_key.disambiguated_data.data {
                 // The name of a constructor is that of its parent.
-                rustc_hir::definitions::DefPathData::Ctor => self.item_name_from_def_id(DefId {
-                    krate: def_id.krate,
-                    index: def_key.parent.unwrap(),
-                }),
-                _ => def_key.disambiguated_data.data.get_opt_name(),
+                rustc_hir::definitions::DefPathData::Ctor => self
+                    .opt_item_name(DefId { krate: def_id.krate, index: def_key.parent.unwrap() }),
+                // The name of opaque types only exists in HIR.
+                rustc_hir::definitions::DefPathData::ImplTrait
+                    if let Some(def_id) = def_id.as_local() =>
+                    self.hir().opt_name(self.hir().local_def_id_to_hir_id(def_id)),
+                _ => def_key.get_opt_name(),
             }
         }
     }
 
-    /// Look up the name of an item across crates. This does not look at HIR.
+    /// Look up the name of a definition across crates. This does not look at HIR.
     ///
     /// When possible, this function should be used for cross-crate lookups over
     /// [`opt_item_name`] to avoid invalidating the incremental cache. If you
@@ -2023,18 +2026,21 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn item_name(self, id: DefId) -> Symbol {
         // Look at cross-crate items first to avoid invalidating the incremental cache
         // unless we have to.
-        self.item_name_from_def_id(id).unwrap_or_else(|| {
+        self.opt_item_name(id).unwrap_or_else(|| {
             bug!("item_name: no name for {:?}", self.def_path(id));
         })
     }
 
-    /// Look up the name and span of an item or [`Node`].
+    /// Look up the name and span of a definition.
     ///
     /// See [`item_name`][Self::item_name] for more information.
-    pub fn opt_item_name(self, def_id: DefId) -> Option<Ident> {
-        // Look at the HIR first so the span will be correct if this is a local item.
-        self.item_name_from_hir(def_id)
-            .or_else(|| self.item_name_from_def_id(def_id).map(Ident::with_dummy_span))
+    pub fn opt_item_ident(self, def_id: DefId) -> Option<Ident> {
+        let def = self.opt_item_name(def_id)?;
+        let span = def_id
+            .as_local()
+            .and_then(|id| self.def_ident_span(id))
+            .unwrap_or(rustc_span::DUMMY_SP);
+        Some(Ident::new(def, span))
     }
 
     pub fn opt_associated_item(self, def_id: DefId) -> Option<&'tcx AssocItem> {
@@ -2135,17 +2141,17 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn expect_variant_res(self, res: Res) -> &'tcx VariantDef {
         match res {
             Res::Def(DefKind::Variant, did) => {
-                let enum_did = self.parent(did).unwrap();
+                let enum_did = self.parent(did);
                 self.adt_def(enum_did).variant_with_id(did)
             }
             Res::Def(DefKind::Struct | DefKind::Union, did) => self.adt_def(did).non_enum_variant(),
             Res::Def(DefKind::Ctor(CtorOf::Variant, ..), variant_ctor_did) => {
-                let variant_did = self.parent(variant_ctor_did).unwrap();
-                let enum_did = self.parent(variant_did).unwrap();
+                let variant_did = self.parent(variant_ctor_did);
+                let enum_did = self.parent(variant_did);
                 self.adt_def(enum_did).variant_with_ctor_id(variant_ctor_did)
             }
             Res::Def(DefKind::Ctor(CtorOf::Struct, ..), ctor_did) => {
-                let struct_did = self.parent(ctor_did).expect("struct ctor has no parent");
+                let struct_did = self.parent(ctor_did);
                 self.adt_def(struct_did).non_enum_variant()
             }
             _ => bug!("expect_variant_res used with unexpected res {:?}", res),

@@ -489,8 +489,10 @@ impl<T> Vec<T> {
     /// * `length` needs to be less than or equal to `capacity`.
     ///
     /// Violating these may cause problems like corrupting the allocator's
-    /// internal data structures. For example it is **not** safe
-    /// to build a `Vec<u8>` from a pointer to a C `char` array with length `size_t`.
+    /// internal data structures. For example it is normally **not** safe
+    /// to build a `Vec<u8>` from a pointer to a C `char` array with length
+    /// `size_t`, doing so is only safe if the array was initially allocated by
+    /// a `Vec` or `String`.
     /// It's also not safe to build one from a `Vec<u16>` and its length, because
     /// the allocator cares about the alignment, and these two types have different
     /// alignments. The buffer was allocated with alignment 2 (for `u16`), but after
@@ -1881,7 +1883,18 @@ impl<T, A: Allocator> Vec<T, A> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn clear(&mut self) {
-        self.truncate(0)
+        let elems: *mut [T] = self.as_mut_slice();
+
+        // SAFETY:
+        // - `elems` comes directly from `as_mut_slice` and is therefore valid.
+        // - Setting `self.len` before calling `drop_in_place` means that,
+        //   if an element's `Drop` impl panics, the vector's `Drop` impl will
+        //   do nothing (leaking the rest of the elements) instead of dropping
+        //   some twice.
+        unsafe {
+            self.len = 0;
+            ptr::drop_in_place(elems);
+        }
     }
 
     /// Returns the number of elements in the vector, also referred to
@@ -2973,48 +2986,6 @@ impl<T, const N: usize> From<[T; N]> for Vec<T> {
     #[cfg(test)]
     fn from(s: [T; N]) -> Vec<T> {
         crate::slice::into_vec(box s)
-    }
-}
-
-#[cfg(not(no_global_oom_handling))]
-#[stable(feature = "vec_from_array_ref", since = "1.61.0")]
-impl<T: Clone, const N: usize> From<&[T; N]> for Vec<T> {
-    /// Allocate a `Vec<T>` and fill it by cloning `s`'s items.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// assert_eq!(Vec::from(b"raw"), vec![b'r', b'a', b'w']);
-    /// ```
-    #[cfg(not(test))]
-    fn from(s: &[T; N]) -> Vec<T> {
-        s.to_vec()
-    }
-
-    #[cfg(test)]
-    fn from(s: &[T; N]) -> Vec<T> {
-        crate::slice::to_vec(s, Global)
-    }
-}
-
-#[cfg(not(no_global_oom_handling))]
-#[stable(feature = "vec_from_array_ref", since = "1.61.0")]
-impl<T: Clone, const N: usize> From<&mut [T; N]> for Vec<T> {
-    /// Allocate a `Vec<T>` and fill it by cloning `s`'s items.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// assert_eq!(Vec::from(&mut [1, 2, 3]), vec![1, 2, 3]);
-    /// ```
-    #[cfg(not(test))]
-    fn from(s: &mut [T; N]) -> Vec<T> {
-        s.to_vec()
-    }
-
-    #[cfg(test)]
-    fn from(s: &mut [T; N]) -> Vec<T> {
-        crate::slice::to_vec(s, Global)
     }
 }
 

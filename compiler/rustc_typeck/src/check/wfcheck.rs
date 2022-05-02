@@ -230,8 +230,7 @@ pub fn check_trait_item(tcx: TyCtxt<'_>, def_id: LocalDefId) {
                         .struct_span_err(
                             self_ty.span,
                             &format!(
-                                "first argument of `call` in `{}` lang item must be a reference",
-                                fn_lang_item_name
+                                "first argument of `call` in `{fn_lang_item_name}` lang item must be a reference",
                             ),
                         )
                         .emit();
@@ -241,8 +240,7 @@ pub fn check_trait_item(tcx: TyCtxt<'_>, def_id: LocalDefId) {
                     .struct_span_err(
                         *span,
                         &format!(
-                            "`call` function in `{}` lang item takes exactly two arguments",
-                            fn_lang_item_name
+                            "`call` function in `{fn_lang_item_name}` lang item takes exactly two arguments",
                         ),
                     )
                     .emit();
@@ -252,8 +250,7 @@ pub fn check_trait_item(tcx: TyCtxt<'_>, def_id: LocalDefId) {
                 .struct_span_err(
                     trait_item.span,
                     &format!(
-                        "`call` trait item in `{}` lang item must be a function",
-                        fn_lang_item_name
+                        "`call` trait item in `{fn_lang_item_name}` lang item must be a function",
                     ),
                 )
                 .emit();
@@ -423,16 +420,12 @@ fn check_gat_where_clauses(tcx: TyCtxt<'_>, associated_items: &[hir::TraitItemRe
 
             let suggestion = format!(
                 "{} {}",
-                if !gat_item_hir.generics.where_clause.predicates.is_empty() {
-                    ","
-                } else {
-                    " where"
-                },
+                if !gat_item_hir.generics.predicates.is_empty() { "," } else { " where" },
                 unsatisfied_bounds.join(", "),
             );
             err.span_suggestion(
-                gat_item_hir.generics.where_clause.tail_span_for_suggestion(),
-                &format!("add the required where clause{}", plural),
+                gat_item_hir.generics.tail_span_for_predicate_suggestion(),
+                &format!("add the required where clause{plural}"),
                 suggestion,
                 Applicability::MachineApplicable,
             );
@@ -523,7 +516,7 @@ fn gather_gat_bounds<'tcx, T: TypeFoldable<'tcx>>(
             // In our example, requires that `Self: 'a`
             if ty_known_to_outlive(tcx, item_hir, param_env, &wf_tys, *ty, *region_a) {
                 debug!(?ty_idx, ?region_a_idx);
-                debug!("required clause: {} must outlive {}", ty, region_a);
+                debug!("required clause: {ty} must outlive {region_a}");
                 // Translate into the generic parameters of the GAT. In
                 // our example, the type was `Self`, which will also be
                 // `Self` in the GAT.
@@ -560,7 +553,7 @@ fn gather_gat_bounds<'tcx, T: TypeFoldable<'tcx>>(
             }
             if region_known_to_outlive(tcx, item_hir, param_env, &wf_tys, *region_a, *region_b) {
                 debug!(?region_a_idx, ?region_b_idx);
-                debug!("required clause: {} must outlive {}", region_a, region_b);
+                debug!("required clause: {region_a} must outlive {region_b}");
                 // Translate into the generic parameters of the GAT.
                 let region_a_param = gat_generics.param_at(*region_a_idx, tcx);
                 let region_a_param =
@@ -816,28 +809,14 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) {
         hir::GenericParamKind::Const { ty: hir_ty, default: _ } => {
             let ty = tcx.type_of(tcx.hir().local_def_id(param.hir_id));
 
-            let err_ty_str;
-            let mut is_ptr = true;
-            let err = if tcx.features().adt_const_params {
-                match ty.peel_refs().kind() {
+            if tcx.features().adt_const_params {
+                let err = match ty.peel_refs().kind() {
                     ty::FnPtr(_) => Some("function pointers"),
                     ty::RawPtr(_) => Some("raw pointers"),
                     _ => None,
-                }
-            } else {
-                match ty.kind() {
-                    ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Error(_) => None,
-                    ty::FnPtr(_) => Some("function pointers"),
-                    ty::RawPtr(_) => Some("raw pointers"),
-                    _ => {
-                        is_ptr = false;
-                        err_ty_str = format!("`{}`", ty);
-                        Some(err_ty_str.as_str())
-                    }
-                }
-            };
-            if let Some(unsupported_type) = err {
-                if is_ptr {
+                };
+
+                if let Some(unsupported_type) = err {
                     tcx.sess.span_err(
                         hir_ty.span,
                         &format!(
@@ -845,63 +824,87 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) {
                             unsupported_type
                         ),
                     );
-                } else {
-                    let mut err = tcx.sess.struct_span_err(
-                        hir_ty.span,
-                        &format!(
-                            "{} is forbidden as the type of a const generic parameter",
-                            unsupported_type
-                        ),
-                    );
-                    err.note("the only supported types are integers, `bool` and `char`");
-                    if tcx.sess.is_nightly_build() {
-                        err.help(
+                }
+
+                if traits::search_for_structural_match_violation(param.span, tcx, ty).is_some() {
+                    // We use the same error code in both branches, because this is really the same
+                    // issue: we just special-case the message for type parameters to make it
+                    // clearer.
+                    if let ty::Param(_) = ty.peel_refs().kind() {
+                        // Const parameters may not have type parameters as their types,
+                        // because we cannot be sure that the type parameter derives `PartialEq`
+                        // and `Eq` (just implementing them is not enough for `structural_match`).
+                        struct_span_err!(
+                            tcx.sess,
+                            hir_ty.span,
+                            E0741,
+                            "`{}` is not guaranteed to `#[derive(PartialEq, Eq)]`, so may not be \
+                            used as the type of a const parameter",
+                            ty,
+                        )
+                        .span_label(
+                            hir_ty.span,
+                            format!("`{}` may not derive both `PartialEq` and `Eq`", ty),
+                        )
+                        .note(
+                            "it is not currently possible to use a type parameter as the type of a \
+                            const parameter",
+                        )
+                        .emit();
+                    } else {
+                        struct_span_err!(
+                            tcx.sess,
+                            hir_ty.span,
+                            E0741,
+                            "`{}` must be annotated with `#[derive(PartialEq, Eq)]` to be used as \
+                            the type of a const parameter",
+                            ty,
+                        )
+                        .span_label(
+                            hir_ty.span,
+                            format!("`{ty}` doesn't derive both `PartialEq` and `Eq`"),
+                        )
+                        .emit();
+                    }
+                }
+            } else {
+                let err_ty_str;
+                let mut is_ptr = true;
+
+                let err = match ty.kind() {
+                    ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Error(_) => None,
+                    ty::FnPtr(_) => Some("function pointers"),
+                    ty::RawPtr(_) => Some("raw pointers"),
+                    _ => {
+                        is_ptr = false;
+                        err_ty_str = format!("`{ty}`");
+                        Some(err_ty_str.as_str())
+                    }
+                };
+
+                if let Some(unsupported_type) = err {
+                    if is_ptr {
+                        tcx.sess.span_err(
+                            hir_ty.span,
+                            &format!(
+                                "using {unsupported_type} as const generic parameters is forbidden",
+                            ),
+                        );
+                    } else {
+                        let mut err = tcx.sess.struct_span_err(
+                            hir_ty.span,
+                            &format!(
+                                "{unsupported_type} is forbidden as the type of a const generic parameter",
+                            ),
+                        );
+                        err.note("the only supported types are integers, `bool` and `char`");
+                        if tcx.sess.is_nightly_build() {
+                            err.help(
                             "more complex types are supported with `#![feature(adt_const_params)]`",
                         );
+                        }
+                        err.emit();
                     }
-                    err.emit();
-                }
-            };
-
-            if traits::search_for_structural_match_violation(param.span, tcx, ty).is_some() {
-                // We use the same error code in both branches, because this is really the same
-                // issue: we just special-case the message for type parameters to make it
-                // clearer.
-                if let ty::Param(_) = ty.peel_refs().kind() {
-                    // Const parameters may not have type parameters as their types,
-                    // because we cannot be sure that the type parameter derives `PartialEq`
-                    // and `Eq` (just implementing them is not enough for `structural_match`).
-                    struct_span_err!(
-                        tcx.sess,
-                        hir_ty.span,
-                        E0741,
-                        "`{}` is not guaranteed to `#[derive(PartialEq, Eq)]`, so may not be \
-                            used as the type of a const parameter",
-                        ty,
-                    )
-                    .span_label(
-                        hir_ty.span,
-                        format!("`{}` may not derive both `PartialEq` and `Eq`", ty),
-                    )
-                    .note(
-                        "it is not currently possible to use a type parameter as the type of a \
-                            const parameter",
-                    )
-                    .emit();
-                } else {
-                    struct_span_err!(
-                        tcx.sess,
-                        hir_ty.span,
-                        E0741,
-                        "`{}` must be annotated with `#[derive(PartialEq, Eq)]` to be used as \
-                            the type of a const parameter",
-                        ty,
-                    )
-                    .span_label(
-                        hir_ty.span,
-                        format!("`{}` doesn't derive both `PartialEq` and `Eq`", ty),
-                    )
-                    .emit();
                 }
             }
         }
@@ -1555,9 +1558,8 @@ fn check_method_receiver<'fcx, 'tcx>(
                     sym::arbitrary_self_types,
                     span,
                     &format!(
-                        "`{}` cannot be used as the type of `self` without \
+                        "`{receiver_ty}` cannot be used as the type of `self` without \
                          the `arbitrary_self_types` feature",
-                        receiver_ty,
                     ),
                 )
                 .help(HELP_FOR_SELF_TYPE)
@@ -1575,8 +1577,7 @@ fn e0307<'tcx>(fcx: &FnCtxt<'_, 'tcx>, span: Span, receiver_ty: Ty<'_>) {
         fcx.tcx.sess.diagnostic(),
         span,
         E0307,
-        "invalid `self` parameter type: {}",
-        receiver_ty,
+        "invalid `self` parameter type: {receiver_ty}"
     )
     .note("type of `self` must be `Self` or a type that dereferences to it")
     .help(HELP_FOR_SELF_TYPE)
@@ -1728,7 +1729,6 @@ fn check_variances_for_type_defn<'tcx>(
     let explicitly_bounded_params = Lazy::new(|| {
         let icx = crate::collect::ItemCtxt::new(tcx, item.def_id.to_def_id());
         hir_generics
-            .where_clause
             .predicates
             .iter()
             .filter_map(|predicate| match predicate {
@@ -1755,8 +1755,7 @@ fn check_variances_for_type_defn<'tcx>(
         match param.name {
             hir::ParamName::Error => {}
             _ => {
-                let has_explicit_bounds =
-                    !param.bounds.is_empty() || explicitly_bounded_params.contains(&parameter);
+                let has_explicit_bounds = explicitly_bounded_params.contains(&parameter);
                 report_bivariance(tcx, param, has_explicit_bounds);
             }
         }
@@ -1781,7 +1780,7 @@ fn report_bivariance(
             tcx.def_path_str(def_id),
         )
     } else {
-        format!("consider removing `{}` or referring to it in a field", param_name)
+        format!("consider removing `{param_name}` or referring to it in a field")
     };
     err.help(&msg);
 
@@ -1814,13 +1813,12 @@ fn check_false_global_bounds(fcx: &FnCtxt<'_, '_>, mut span: Span, id: hir::HirI
 
             // only use the span of the predicate clause (#90869)
 
-            if let Some(hir::Generics { where_clause, .. }) =
+            if let Some(hir::Generics { predicates, .. }) =
                 hir_node.and_then(|node| node.generics())
             {
                 let obligation_span = obligation.cause.span(fcx.tcx);
 
-                span = where_clause
-                    .predicates
+                span = predicates
                     .iter()
                     // There seems to be no better way to find out which predicate we are in
                     .find(|pred| pred.span().contains(obligation_span))
@@ -1981,8 +1979,7 @@ fn error_392(
     span: Span,
     param_name: Symbol,
 ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
-    let mut err =
-        struct_span_err!(tcx.sess, span, E0392, "parameter `{}` is never used", param_name);
+    let mut err = struct_span_err!(tcx.sess, span, E0392, "parameter `{param_name}` is never used");
     err.span_label(span, "unused parameter");
     err
 }

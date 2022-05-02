@@ -1,12 +1,11 @@
 use crate::snippet::Style;
 use crate::{
     CodeSuggestion, DiagnosticMessage, Level, MultiSpan, Substitution, SubstitutionPart,
-    SuggestionStyle, ToolMetadata,
+    SuggestionStyle,
 };
 use rustc_data_structures::stable_map::FxHashMap;
 use rustc_error_messages::FluentValue;
 use rustc_lint_defs::{Applicability, LintExpectationId};
-use rustc_serialize::json::Json;
 use rustc_span::edition::LATEST_STABLE_EDITION;
 use rustc_span::symbol::{Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
@@ -77,6 +76,13 @@ impl<'source> Into<FluentValue<'source>> for DiagnosticArgValue<'source> {
             DiagnosticArgValue::Number(n) => From::from(n),
         }
     }
+}
+
+/// Trait implemented by error types. This should not be implemented manually. Instead, use
+/// `#[derive(SessionSubdiagnostic)]` -- see [rustc_macros::SessionSubdiagnostic].
+pub trait AddSubdiagnostic {
+    /// Add a subdiagnostic to an existing diagnostic.
+    fn add_to_diagnostic(self, diag: &mut Diagnostic);
 }
 
 #[must_use]
@@ -554,7 +560,6 @@ impl Diagnostic {
             msg: msg.into(),
             style,
             applicability,
-            tool_metadata: Default::default(),
         });
         self
     }
@@ -582,7 +587,6 @@ impl Diagnostic {
             msg: msg.into(),
             style: SuggestionStyle::CompletelyHidden,
             applicability,
-            tool_metadata: Default::default(),
         });
         self
     }
@@ -608,7 +612,7 @@ impl Diagnostic {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self {
         self.span_suggestion_with_style(
@@ -626,18 +630,17 @@ impl Diagnostic {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
         style: SuggestionStyle,
     ) -> &mut Self {
         self.push_suggestion(CodeSuggestion {
             substitutions: vec![Substitution {
-                parts: vec![SubstitutionPart { snippet: suggestion, span: sp }],
+                parts: vec![SubstitutionPart { snippet: suggestion.to_string(), span: sp }],
             }],
             msg: msg.into(),
             style,
             applicability,
-            tool_metadata: Default::default(),
         });
         self
     }
@@ -647,7 +650,7 @@ impl Diagnostic {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self {
         self.span_suggestion_with_style(
@@ -680,7 +683,6 @@ impl Diagnostic {
             msg: msg.into(),
             style: SuggestionStyle::ShowCode,
             applicability,
-            tool_metadata: Default::default(),
         });
         self
     }
@@ -705,7 +707,6 @@ impl Diagnostic {
             msg: msg.into(),
             style: SuggestionStyle::ShowCode,
             applicability,
-            tool_metadata: Default::default(),
         });
         self
     }
@@ -717,7 +718,7 @@ impl Diagnostic {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self {
         self.span_suggestion_with_style(
@@ -740,7 +741,7 @@ impl Diagnostic {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self {
         self.span_suggestion_with_style(
@@ -761,7 +762,7 @@ impl Diagnostic {
         &mut self,
         sp: Span,
         msg: impl Into<DiagnosticMessage>,
-        suggestion: String,
+        suggestion: impl ToString,
         applicability: Applicability,
     ) -> &mut Self {
         self.span_suggestion_with_style(
@@ -774,21 +775,11 @@ impl Diagnostic {
         self
     }
 
-    /// Adds a suggestion intended only for a tool. The intent is that the metadata encodes
-    /// the suggestion in a tool-specific way, as it may not even directly involve Rust code.
-    pub fn tool_only_suggestion_with_metadata(
-        &mut self,
-        msg: impl Into<DiagnosticMessage>,
-        applicability: Applicability,
-        tool_metadata: Json,
-    ) {
-        self.push_suggestion(CodeSuggestion {
-            substitutions: vec![],
-            msg: msg.into(),
-            style: SuggestionStyle::CompletelyHidden,
-            applicability,
-            tool_metadata: ToolMetadata::new(tool_metadata),
-        })
+    /// Add a subdiagnostic from a type that implements `SessionSubdiagnostic` - see
+    /// [rustc_macros::SessionSubdiagnostic].
+    pub fn subdiagnostic(&mut self, subdiagnostic: impl AddSubdiagnostic) -> &mut Self {
+        subdiagnostic.add_to_diagnostic(self);
+        self
     }
 
     pub fn set_span<S: Into<MultiSpan>>(&mut self, sp: S) -> &mut Self {
@@ -832,7 +823,7 @@ impl Diagnostic {
         name: impl Into<Cow<'static, str>>,
         arg: DiagnosticArgValue<'static>,
     ) -> &mut Self {
-        self.args.push((name.into(), arg.into()));
+        self.args.push((name.into(), arg));
         self
     }
 

@@ -115,6 +115,12 @@ impl<'tcx, Tag: Provenance> std::ops::Deref for MPlaceTy<'tcx, Tag> {
     }
 }
 
+impl<'tcx, Tag: Provenance> std::ops::DerefMut for MPlaceTy<'tcx, Tag> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.mplace
+    }
+}
+
 impl<'tcx, Tag: Provenance> From<MPlaceTy<'tcx, Tag>> for PlaceTy<'tcx, Tag> {
     #[inline(always)]
     fn from(mplace: MPlaceTy<'tcx, Tag>) -> Self {
@@ -191,7 +197,7 @@ impl<'tcx, Tag: Provenance> MPlaceTy<'tcx, Tag> {
     }
 
     #[inline]
-    pub(super) fn len(&self, cx: &impl HasDataLayout) -> InterpResult<'tcx, u64> {
+    pub(crate) fn len(&self, cx: &impl HasDataLayout) -> InterpResult<'tcx, u64> {
         if self.layout.is_unsized() {
             // We need to consult `meta` metadata
             match self.layout.ty.kind() {
@@ -294,6 +300,7 @@ where
 
     /// Take an operand, representing a pointer, and dereference it to a place -- that
     /// will always be a MemPlace.  Lives in `place.rs` because it creates a place.
+    #[instrument(skip(self), level = "debug")]
     pub fn deref_operand(
         &self,
         src: &OpTy<'tcx, M::PointerTag>,
@@ -487,7 +494,8 @@ where
     }
 
     /// Project into an mplace
-    pub(super) fn mplace_projection(
+    #[instrument(skip(self), level = "debug")]
+    pub(crate) fn mplace_projection(
         &self,
         base: &MPlaceTy<'tcx, M::PointerTag>,
         proj_elem: mir::PlaceElem<'tcx>,
@@ -548,6 +556,7 @@ where
     /// Just a convenience function, but used quite a bit.
     /// This is the only projection that might have a side-effect: We cannot project
     /// into the field of a local `ScalarPair`, we have to first allocate it.
+    #[instrument(skip(self), level = "debug")]
     pub fn place_field(
         &mut self,
         base: &PlaceTy<'tcx, M::PointerTag>,
@@ -617,6 +626,7 @@ where
 
     /// Computes a place. You should only use this if you intend to write into this
     /// place; for reading, a more efficient alternative is `eval_place_for_read`.
+    #[instrument(skip(self), level = "debug")]
     pub fn eval_place(
         &mut self,
         place: mir::Place<'tcx>,
@@ -646,6 +656,7 @@ where
 
     /// Write an immediate to a place
     #[inline(always)]
+    #[instrument(skip(self), level = "debug")]
     pub fn write_immediate(
         &mut self,
         src: Immediate<M::PointerTag>,
@@ -791,9 +802,46 @@ where
         }
     }
 
+    pub fn write_uninit(&mut self, dest: &PlaceTy<'tcx, M::PointerTag>) -> InterpResult<'tcx> {
+        let mplace = match dest.place {
+            Place::Ptr(mplace) => MPlaceTy { mplace, layout: dest.layout },
+            Place::Local { frame, local } => {
+                match M::access_local_mut(self, frame, local)? {
+                    Ok(local) => match dest.layout.abi {
+                        Abi::Scalar(_) => {
+                            *local = LocalValue::Live(Operand::Immediate(Immediate::Scalar(
+                                ScalarMaybeUninit::Uninit,
+                            )));
+                            return Ok(());
+                        }
+                        Abi::ScalarPair(..) => {
+                            *local = LocalValue::Live(Operand::Immediate(Immediate::ScalarPair(
+                                ScalarMaybeUninit::Uninit,
+                                ScalarMaybeUninit::Uninit,
+                            )));
+                            return Ok(());
+                        }
+                        _ => self.force_allocation(dest)?,
+                    },
+                    Err(mplace) => {
+                        // The local is in memory, go on below.
+                        MPlaceTy { mplace, layout: dest.layout }
+                    }
+                }
+            }
+        };
+        let Some(mut alloc) = self.get_place_alloc_mut(&mplace)? else {
+            // Zero-sized access
+            return Ok(());
+        };
+        alloc.write_uninit()?;
+        Ok(())
+    }
+
     /// Copies the data from an operand to a place. This does not support transmuting!
     /// Use `copy_op_transmute` if the layouts could disagree.
     #[inline(always)]
+    #[instrument(skip(self), level = "debug")]
     pub fn copy_op(
         &mut self,
         src: &OpTy<'tcx, M::PointerTag>,
@@ -813,6 +861,7 @@ where
     /// Use `copy_op_transmute` if the layouts could disagree.
     /// Also, if you use this you are responsible for validating that things get copied at the
     /// right type.
+    #[instrument(skip(self), level = "debug")]
     fn copy_op_no_validate(
         &mut self,
         src: &OpTy<'tcx, M::PointerTag>,
@@ -919,6 +968,7 @@ where
     /// This supports unsized types and returns the computed size to avoid some
     /// redundant computation when copying; use `force_allocation` for a simpler, sized-only
     /// version.
+    #[instrument(skip(self), level = "debug")]
     pub fn force_allocation_maybe_sized(
         &mut self,
         place: &PlaceTy<'tcx, M::PointerTag>,
@@ -1001,6 +1051,7 @@ where
     }
 
     /// Writes the discriminant of the given variant.
+    #[instrument(skip(self), level = "debug")]
     pub fn write_discriminant(
         &mut self,
         variant_index: VariantIdx,

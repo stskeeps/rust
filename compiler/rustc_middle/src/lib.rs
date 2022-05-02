@@ -30,7 +30,7 @@
 #![feature(bool_to_option)]
 #![feature(box_patterns)]
 #![feature(core_intrinsics)]
-#![feature(derive_default_enum)]
+#![cfg_attr(bootstrap, feature(derive_default_enum))]
 #![feature(discriminant_kind)]
 #![feature(exhaustive_patterns)]
 #![feature(get_mut_unchecked)]
@@ -59,6 +59,7 @@
 #![feature(unwrap_infallible)]
 #![feature(decl_macro)]
 #![feature(drain_filter)]
+#![feature(intra_doc_pointers)]
 #![recursion_limit = "512"]
 #![allow(rustc::potential_query_instability)]
 

@@ -337,8 +337,8 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                         icx.to_ty(ty)
                     }
                 }
-                ItemKind::TyAlias(self_ty, _)
-                | ItemKind::Impl(hir::Impl { self_ty, .. }) => icx.to_ty(self_ty),
+                ItemKind::TyAlias(self_ty, _) => icx.to_ty(self_ty),
+                ItemKind::Impl(hir::Impl { self_ty, .. }) => icx.to_ty(*self_ty),
                 ItemKind::Fn(..) => {
                     let substs = InternalSubsts::identity_for_item(tcx, def_id.to_def_id());
                     tcx.mk_fn_def(def_id.to_def_id(), substs)
@@ -450,7 +450,8 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                 Node::Expr(&Expr { kind: ExprKind::InlineAsm(asm), .. })
                 | Node::Item(&Item { kind: ItemKind::GlobalAsm(asm), .. })
                     if asm.operands.iter().any(|(op, _op_sp)| match op {
-                        hir::InlineAsmOperand::Const { anon_const } => anon_const.hir_id == hir_id,
+                        hir::InlineAsmOperand::Const { anon_const }
+                        | hir::InlineAsmOperand::SymFn { anon_const } => anon_const.hir_id == hir_id,
                         _ => false,
                     }) =>
                 {
@@ -682,7 +683,7 @@ fn find_opaque_ty_constraints(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Ty<'_> {
         Some(hidden) => hidden.ty,
         None => {
             let span = tcx.def_span(def_id);
-            let name = tcx.item_name(tcx.parent(def_id.to_def_id()).unwrap());
+            let name = tcx.item_name(tcx.local_parent(def_id).to_def_id());
             let label = format!(
                 "`{}` must be used in combination with a concrete type within the same module",
                 name

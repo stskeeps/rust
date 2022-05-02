@@ -3,13 +3,14 @@
 
 use crate::config::CheckCfg;
 use crate::lint::{BufferedEarlyLint, BuiltinLintDiagnostics, Lint, LintId};
+use crate::SessionDiagnostic;
 use rustc_ast::node_id::NodeId;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync::{Lock, Lrc};
 use rustc_errors::{emitter::SilentEmitter, ColorConfig, Handler};
 use rustc_errors::{
     error_code, fallback_fluent_bundle, Applicability, Diagnostic, DiagnosticBuilder,
-    ErrorGuaranteed, MultiSpan,
+    DiagnosticMessage, ErrorGuaranteed, MultiSpan,
 };
 use rustc_feature::{find_feature_issue, GateIssue, UnstableFeatures};
 use rustc_span::edition::Edition;
@@ -140,7 +141,6 @@ pub struct ParseSess {
     pub config: CrateConfig,
     pub check_config: CrateCheckConfig,
     pub edition: Edition,
-    pub missing_fragment_specifiers: Lock<FxHashMap<Span, NodeId>>,
     /// Places where raw identifiers were used. This is used to avoid complaining about idents
     /// clashing with keywords in new editions.
     pub raw_identifier_spans: Lock<Vec<Span>>,
@@ -174,8 +174,7 @@ pub struct ParseSess {
 impl ParseSess {
     /// Used for testing.
     pub fn new(file_path_mapping: FilePathMapping) -> Self {
-        let fallback_bundle =
-            fallback_fluent_bundle(false).expect("failed to load fallback fluent bundle");
+        let fallback_bundle = fallback_fluent_bundle(rustc_errors::DEFAULT_LOCALE_RESOURCES, false);
         let sm = Lrc::new(SourceMap::new(file_path_mapping));
         let handler = Handler::with_tty_emitter(
             ColorConfig::Auto,
@@ -195,7 +194,6 @@ impl ParseSess {
             config: FxHashSet::default(),
             check_config: CrateCheckConfig::default(),
             edition: ExpnId::root().expn_data().edition,
-            missing_fragment_specifiers: Default::default(),
             raw_identifier_spans: Lock::new(Vec::new()),
             bad_unicode_identifiers: Lock::new(Default::default()),
             source_map,
@@ -213,8 +211,7 @@ impl ParseSess {
     }
 
     pub fn with_silent_emitter(fatal_note: Option<String>) -> Self {
-        let fallback_bundle =
-            fallback_fluent_bundle(false).expect("failed to load fallback fluent bundle");
+        let fallback_bundle = fallback_fluent_bundle(rustc_errors::DEFAULT_LOCALE_RESOURCES, false);
         let sm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
         let fatal_handler =
             Handler::with_tty_emitter(ColorConfig::Auto, false, None, None, None, fallback_bundle);
@@ -290,5 +287,24 @@ impl ParseSess {
 
     pub fn proc_macro_quoted_spans(&self) -> Vec<Span> {
         self.proc_macro_quoted_spans.lock().clone()
+    }
+
+    pub fn emit_err<'a>(&'a self, err: impl SessionDiagnostic<'a>) -> ErrorGuaranteed {
+        err.into_diagnostic(self).emit()
+    }
+
+    pub fn emit_warning<'a>(&'a self, warning: impl SessionDiagnostic<'a, ()>) {
+        warning.into_diagnostic(self).emit()
+    }
+
+    pub fn struct_err(
+        &self,
+        msg: impl Into<DiagnosticMessage>,
+    ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
+        self.span_diagnostic.struct_err(msg)
+    }
+
+    pub fn struct_warn(&self, msg: impl Into<DiagnosticMessage>) -> DiagnosticBuilder<'_, ()> {
+        self.span_diagnostic.struct_warn(msg)
     }
 }
