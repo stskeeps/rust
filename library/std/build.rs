@@ -30,8 +30,9 @@ fn main() {
         || target.contains("espidf")
         || target.contains("solid")
         || target.contains("zkvm")
-	// Workaround for https://github.com/risc0/risc0/issues/116
-	|| target.contains("riscv32im")
+        // The "riscv32im" case can be removed when we no longer need a workaround for https://github.com/rust-lang/cargo/issues/10760.
+        // See "risc0/build/rustc_wrapper.py" in the risc0/risc0 repository for details.
+        || target.contains("riscv32im")
     {
         // These platforms don't have any special requirements.
     } else {
