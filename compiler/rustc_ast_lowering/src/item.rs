@@ -19,7 +19,6 @@ use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::Span;
 use rustc_target::spec::abi;
 use smallvec::{smallvec, SmallVec};
-use tracing::debug;
 
 use std::iter;
 
@@ -117,6 +116,7 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         self.owners[def_id]
     }
 
+    #[instrument(level = "debug", skip(self, c))]
     fn lower_crate(&mut self, c: &Crate) {
         debug_assert_eq!(self.resolver.local_def_id(CRATE_NODE_ID), CRATE_DEF_ID);
 
@@ -127,6 +127,7 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         })
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn lower_item(&mut self, item: &Item) {
         self.with_lctx(item.id, |lctx| hir::OwnerNode::Item(lctx.lower_item(item)))
     }
@@ -485,6 +486,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         (ty, self.lower_const_body(span, body))
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn lower_use_tree(
         &mut self,
         tree: &UseTree,
@@ -494,8 +496,6 @@ impl<'hir> LoweringContext<'_, 'hir> {
         ident: &mut Ident,
         attrs: Option<&'hir [Attribute]>,
     ) -> hir::ItemKind<'hir> {
-        debug!("lower_use_tree(tree={:?})", tree);
-
         let path = &tree.prefix;
         let segments = prefix.segments.iter().chain(path.segments.iter()).cloned().collect();
 
@@ -1298,6 +1298,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
     /// Return the pair of the lowered `generics` as `hir::Generics` and the evaluation of `f` with
     /// the carried impl trait definitions and bounds.
+    #[instrument(level = "debug", skip(self, f))]
     fn lower_generics<T>(
         &mut self,
         generics: &Generics,
@@ -1376,7 +1377,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
         let mut params: SmallVec<[hir::GenericParam<'hir>; 4]> =
             self.lower_generic_params_mut(&generics.params).collect();
-        let has_where_clause = !generics.where_clause.predicates.is_empty();
+        let has_where_clause_predicates = !generics.where_clause.predicates.is_empty();
         let where_clause_span = self.lower_span(generics.where_clause.span);
         let span = self.lower_span(generics.span);
         let res = f(self);
@@ -1394,7 +1395,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let lowered_generics = self.arena.alloc(hir::Generics {
             params: self.arena.alloc_from_iter(params),
             predicates: self.arena.alloc_from_iter(predicates),
-            has_where_clause,
+            has_where_clause_predicates,
             where_clause_span,
             span,
         });

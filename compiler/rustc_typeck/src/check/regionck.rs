@@ -82,7 +82,7 @@ use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::PatKind;
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
-use rustc_infer::infer::{self, InferCtxt, RegionObligation, RegionckMode};
+use rustc_infer::infer::{self, InferCtxt, RegionObligation};
 use rustc_middle::hir::place::{PlaceBase, PlaceWithHirId};
 use rustc_middle::ty::adjustment;
 use rustc_middle::ty::{self, Ty};
@@ -129,6 +129,7 @@ impl<'tcx> OutlivesEnvironmentExt<'tcx> for OutlivesEnvironment<'tcx> {
     /// add those assumptions into the outlives-environment.
     ///
     /// Tests: `src/test/ui/regions/regions-free-region-ordering-*.rs`
+    #[instrument(level = "debug", skip(self, infcx))]
     fn add_implied_bounds<'a>(
         &mut self,
         infcx: &InferCtxt<'a, 'tcx>,
@@ -136,11 +137,8 @@ impl<'tcx> OutlivesEnvironmentExt<'tcx> for OutlivesEnvironment<'tcx> {
         body_id: hir::HirId,
         span: Span,
     ) {
-        debug!("add_implied_bounds()");
-
         for ty in fn_sig_tys {
             let ty = infcx.resolve_vars_if_possible(ty);
-            debug!("add_implied_bounds: ty = {}", ty);
             let implied_bounds = infcx.implied_outlives_bounds(self.param_env, body_id, ty, span);
             self.add_outlives_bounds(Some(infcx), implied_bounds)
         }
@@ -165,7 +163,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             rcx.visit_body(body);
             rcx.visit_region_obligations(id);
         }
-        rcx.resolve_regions_and_report_errors(RegionckMode::Erase);
+        // Checked by NLL
+        rcx.fcx.skip_region_resolution();
     }
 
     /// Region checking during the WF phase for items. `wf_tys` are the
@@ -177,7 +176,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         rcx.outlives_environment.add_implied_bounds(self, wf_tys, item_id, span);
         rcx.outlives_environment.save_implied_bounds(item_id);
         rcx.visit_region_obligations(item_id);
-        rcx.resolve_regions_and_report_errors(RegionckMode::default());
+        rcx.resolve_regions_and_report_errors();
     }
 
     /// Region check a function body. Not invoked on closures, but
@@ -208,7 +207,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             rcx.visit_fn_body(fn_id, body, self.tcx.hir().span(fn_id));
         }
 
-        rcx.resolve_regions_and_report_errors(RegionckMode::Erase);
+        // Checked by NLL
+        rcx.fcx.skip_region_resolution();
     }
 }
 
@@ -363,7 +363,7 @@ impl<'a, 'tcx> RegionCtxt<'a, 'tcx> {
         self.select_all_obligations_or_error();
     }
 
-    fn resolve_regions_and_report_errors(&self, mode: RegionckMode) {
+    fn resolve_regions_and_report_errors(&self) {
         self.infcx.process_registered_region_obligations(
             self.outlives_environment.region_bound_pairs_map(),
             Some(self.tcx.lifetimes.re_root_empty),
@@ -373,7 +373,6 @@ impl<'a, 'tcx> RegionCtxt<'a, 'tcx> {
         self.fcx.resolve_regions_and_report_errors(
             self.subject_def_id.to_def_id(),
             &self.outlives_environment,
-            mode,
         );
     }
 

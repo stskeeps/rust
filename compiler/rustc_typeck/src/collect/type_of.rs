@@ -8,7 +8,7 @@ use rustc_hir::{HirId, Node};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::util::IntTypeExt;
-use rustc_middle::ty::{self, DefIdTree, Ty, TyCtxt, TypeFoldable, TypeFolder};
+use rustc_middle::ty::{self, DefIdTree, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable};
 use rustc_span::symbol::Ident;
 use rustc_span::{Span, DUMMY_SP};
 
@@ -756,7 +756,7 @@ fn infer_placeholder_type<'a>(
                     diag.span_suggestion(
                         span,
                         "replace with the correct type",
-                        sugg_ty.to_string(),
+                        sugg_ty,
                         Applicability::MaybeIncorrect,
                     );
                 } else {

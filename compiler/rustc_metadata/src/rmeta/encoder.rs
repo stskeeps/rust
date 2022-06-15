@@ -31,7 +31,7 @@ use rustc_serialize::{opaque, Encodable, Encoder};
 use rustc_session::config::CrateType;
 use rustc_session::cstore::{ForeignModule, LinkagePreference, NativeLib};
 use rustc_span::hygiene::{ExpnIndex, HygieneEncodeContext, MacroKind};
-use rustc_span::symbol::{sym, Ident, Symbol};
+use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{
     self, DebuggerVisualizerFile, ExternalSource, FileName, SourceFile, Span, SyntaxContext,
 };
@@ -86,14 +86,15 @@ macro_rules! empty_proc_macro {
 
 macro_rules! encoder_methods {
     ($($name:ident($ty:ty);)*) => {
-        $(fn $name(&mut self, value: $ty) -> Result<(), Self::Error> {
+        $(fn $name(&mut self, value: $ty) {
             self.opaque.$name(value)
         })*
     }
 }
 
 impl<'a, 'tcx> Encoder for EncodeContext<'a, 'tcx> {
-    type Error = <opaque::Encoder as Encoder>::Error;
+    type Ok = <opaque::Encoder as Encoder>::Ok;
+    type Err = <opaque::Encoder as Encoder>::Err;
 
     encoder_methods! {
         emit_usize(usize);
@@ -117,60 +118,63 @@ impl<'a, 'tcx> Encoder for EncodeContext<'a, 'tcx> {
         emit_str(&str);
         emit_raw_bytes(&[u8]);
     }
+
+    fn finish(self) -> Result<Self::Ok, Self::Err> {
+        self.opaque.finish()
+    }
 }
 
 impl<'a, 'tcx, T> Encodable<EncodeContext<'a, 'tcx>> for LazyValue<T> {
-    fn encode(&self, e: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
-        e.emit_lazy_distance(self.position)
+    fn encode(&self, e: &mut EncodeContext<'a, 'tcx>) {
+        e.emit_lazy_distance(self.position);
     }
 }
 
 impl<'a, 'tcx, T> Encodable<EncodeContext<'a, 'tcx>> for LazyArray<T> {
-    fn encode(&self, e: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
-        e.emit_usize(self.num_elems)?;
-        if self.num_elems == 0 {
-            return Ok(());
+    fn encode(&self, e: &mut EncodeContext<'a, 'tcx>) {
+        e.emit_usize(self.num_elems);
+        if self.num_elems > 0 {
+            e.emit_lazy_distance(self.position)
         }
-        e.emit_lazy_distance(self.position)
     }
 }
 
 impl<'a, 'tcx, I, T> Encodable<EncodeContext<'a, 'tcx>> for LazyTable<I, T> {
-    fn encode(&self, e: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
-        e.emit_usize(self.encoded_size)?;
-        e.emit_lazy_distance(self.position)
+    fn encode(&self, e: &mut EncodeContext<'a, 'tcx>) {
+        e.emit_usize(self.encoded_size);
+        e.emit_lazy_distance(self.position);
     }
 }
 
 impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for CrateNum {
-    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
+    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) {
         if *self != LOCAL_CRATE && s.is_proc_macro {
             panic!("Attempted to encode non-local CrateNum {:?} for proc-macro crate", self);
         }
-        s.emit_u32(self.as_u32())
+        s.emit_u32(self.as_u32());
     }
 }
 
 impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for DefIndex {
-    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
-        s.emit_u32(self.as_u32())
+    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) {
+        s.emit_u32(self.as_u32());
     }
 }
 
 impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for ExpnIndex {
-    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
-        s.emit_u32(self.as_u32())
+    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) {
+        s.emit_u32(self.as_u32());
     }
 }
 
 impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for SyntaxContext {
-    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
-        rustc_span::hygiene::raw_encode_syntax_context(*self, &s.hygiene_ctxt, s)
+    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) {
+        rustc_span::hygiene::raw_encode_syntax_context(*self, &s.hygiene_ctxt, s);
     }
 }
 
 impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for ExpnId {
-    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
+    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) {
         if self.krate == LOCAL_CRATE {
             // We will only write details for local expansions.  Non-local expansions will fetch
             // data from the corresponding crate's metadata.
@@ -178,13 +182,13 @@ impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for ExpnId {
             // metadata from proc-macro crates.
             s.hygiene_ctxt.schedule_expn_data_for_encoding(*self);
         }
-        self.krate.encode(s)?;
-        self.local_id.encode(s)
+        self.krate.encode(s);
+        self.local_id.encode(s);
     }
 }
 
 impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for Span {
-    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) -> opaque::EncodeResult {
+    fn encode(&self, s: &mut EncodeContext<'a, 'tcx>) {
         let span = self.data();
 
         // Don't serialize any `SyntaxContext`s from a proc-macro crate,
@@ -219,9 +223,9 @@ impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for Span {
         // `rustc_span::hygiene::raw_encode_expn_id` to handle
         // encoding `ExpnData` for proc-macro crates.
         if s.is_proc_macro {
-            SyntaxContext::root().encode(s)?;
+            SyntaxContext::root().encode(s);
         } else {
-            span.ctxt.encode(s)?;
+            span.ctxt.encode(s);
         }
 
         if self.is_dummy() {
@@ -289,22 +293,20 @@ impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for Span {
             (TAG_VALID_SPAN_LOCAL, span.lo, span.hi)
         };
 
-        tag.encode(s)?;
-        lo.encode(s)?;
+        tag.encode(s);
+        lo.encode(s);
 
         // Encode length which is usually less than span.hi and profits more
         // from the variable-length integer encoding that we use.
         let len = hi - lo;
-        len.encode(s)?;
+        len.encode(s);
 
         if tag == TAG_VALID_SPAN_FOREIGN {
             // This needs to be two lines to avoid holding the `s.source_file_cache`
             // while calling `cnum.encode(s)`
             let cnum = s.source_file_cache.0.cnum;
-            cnum.encode(s)?;
+            cnum.encode(s);
         }
-
-        Ok(())
     }
 }
 
@@ -325,13 +327,10 @@ impl<'a, 'tcx> TyEncoder for EncodeContext<'a, 'tcx> {
         &mut self.predicate_shorthands
     }
 
-    fn encode_alloc_id(
-        &mut self,
-        alloc_id: &rustc_middle::mir::interpret::AllocId,
-    ) -> Result<(), Self::Error> {
+    fn encode_alloc_id(&mut self, alloc_id: &rustc_middle::mir::interpret::AllocId) {
         let (index, _) = self.interpret_allocs.insert_full(*alloc_id);
 
-        index.encode(self)
+        index.encode(self);
     }
 }
 
@@ -360,10 +359,7 @@ macro_rules! record_array {
 }
 
 impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
-    fn emit_lazy_distance(
-        &mut self,
-        position: NonZeroUsize,
-    ) -> Result<(), <Self as Encoder>::Error> {
+    fn emit_lazy_distance(&mut self, position: NonZeroUsize) {
         let pos = position.get();
         let distance = match self.lazy_state {
             LazyState::NoNode => bug!("emit_lazy_distance: outside of a metadata node"),
@@ -382,7 +378,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
         };
         self.lazy_state = LazyState::Previous(NonZeroUsize::new(pos).unwrap());
-        self.emit_usize(distance)
+        self.emit_usize(distance);
     }
 
     fn lazy<T: ParameterizedOverTcx, B: Borrow<T::Value<'tcx>>>(&mut self, value: B) -> LazyValue<T>
@@ -393,7 +389,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
         assert_eq!(self.lazy_state, LazyState::NoNode);
         self.lazy_state = LazyState::NodeStart(pos);
-        value.borrow().encode(self).unwrap();
+        value.borrow().encode(self);
         self.lazy_state = LazyState::NoNode;
 
         assert!(pos.get() <= self.position());
@@ -412,7 +408,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
         assert_eq!(self.lazy_state, LazyState::NoNode);
         self.lazy_state = LazyState::NodeStart(pos);
-        let len = values.into_iter().map(|value| value.borrow().encode(self).unwrap()).count();
+        let len = values.into_iter().map(|value| value.borrow().encode(self)).count();
         self.lazy_state = LazyState::NoNode;
 
         assert!(pos.get() <= self.position());
@@ -615,7 +611,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     let id = self.interpret_allocs[idx];
                     let pos = self.position() as u32;
                     interpret_alloc_index.push(pos);
-                    interpret::specialized_encode_alloc_id(self, tcx, id).unwrap();
+                    interpret::specialized_encode_alloc_id(self, tcx, id);
                 }
                 n = new_n;
             }
@@ -1011,6 +1007,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             record!(self.tables.def_span[def_id] <- tcx.def_span(def_id));
             self.encode_attrs(local_id);
             record!(self.tables.expn_that_defined[def_id] <- self.tcx.expn_that_defined(def_id));
+            if let Some(ident_span) = tcx.def_ident_span(def_id) {
+                record!(self.tables.def_ident_span[def_id] <- ident_span);
+            }
             if def_kind.has_codegen_attrs() {
                 record!(self.tables.codegen_fn_attrs[def_id] <- self.tcx.codegen_fn_attrs(def_id));
             }
@@ -1075,7 +1074,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             assert!(f.did.is_local());
             f.did.index
         }));
-        self.encode_ident_span(def_id, variant.ident(tcx));
         self.encode_item_type(def_id);
         if variant.ctor_kind == CtorKind::Fn {
             // FIXME(eddyb) encode signature only in `encode_enum_variant_ctor`.
@@ -1167,7 +1165,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         debug!("EncodeContext::encode_field({:?})", def_id);
 
         record!(self.tables.kind[def_id] <- EntryKind::Field);
-        self.encode_ident_span(def_id, field.ident(self.tcx));
         self.encode_item_type(def_id);
     }
 
@@ -1246,7 +1243,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 record!(self.tables.kind[def_id] <- EntryKind::AssocType(container));
             }
         }
-        self.encode_ident_span(def_id, ast_item.ident);
         match trait_item.kind {
             ty::AssocKind::Const | ty::AssocKind::Fn => {
                 self.encode_item_type(def_id);
@@ -1310,7 +1306,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 record!(self.tables.kind[def_id] <- EntryKind::AssocType(container));
             }
         }
-        self.encode_ident_span(def_id, impl_item.ident(self.tcx));
         self.encode_item_type(def_id);
         if let Some(trait_item_def_id) = impl_item.trait_item_def_id {
             self.tables.trait_item_def_id.set(def_id.index, trait_item_def_id.into());
@@ -1411,8 +1406,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         let tcx = self.tcx;
 
         debug!("EncodeContext::encode_info_for_item({:?})", def_id);
-
-        self.encode_ident_span(def_id, item.ident);
 
         let entry_kind = match item.kind {
             hir::ItemKind::Static(..) => EntryKind::Static,
@@ -1640,18 +1633,16 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         let mut expn_data_table: TableBuilder<_, _> = Default::default();
         let mut expn_hash_table: TableBuilder<_, _> = Default::default();
 
-        let _: Result<(), !> = self.hygiene_ctxt.encode(
+        self.hygiene_ctxt.encode(
             &mut (&mut *self, &mut syntax_contexts, &mut expn_data_table, &mut expn_hash_table),
             |(this, syntax_contexts, _, _), index, ctxt_data| {
                 syntax_contexts.set(index, this.lazy(ctxt_data));
-                Ok(())
             },
             |(this, _, expn_data_table, expn_hash_table), index, expn_data, hash| {
                 if let Some(index) = index.as_local() {
                     expn_data_table.set(index.as_raw(), this.lazy(expn_data));
                     expn_hash_table.set(index.as_raw(), this.lazy(hash));
                 }
-                Ok(())
             },
         );
 
@@ -1959,7 +1950,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 record!(self.tables.kind[def_id] <- EntryKind::ForeignType);
             }
         }
-        self.encode_ident_span(def_id, nitem.ident);
         self.encode_item_type(def_id);
         if let hir::ForeignItemKind::Fn(..) = nitem.kind {
             record!(self.tables.fn_sig[def_id] <- tcx.fn_sig(def_id));
@@ -2039,10 +2029,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         if let hir::ExprKind::Closure(..) = expr.kind {
             self.encode_info_for_closure(expr.hir_id);
         }
-    }
-
-    fn encode_ident_span(&mut self, def_id: DefId, ident: Ident) {
-        record!(self.tables.def_ident_span[def_id] <- ident.span);
     }
 
     /// In some cases, along with the item itself, we also
@@ -2194,11 +2180,11 @@ pub fn encode_metadata(tcx: TyCtxt<'_>) -> EncodedMetadata {
 }
 
 fn encode_metadata_impl(tcx: TyCtxt<'_>) -> EncodedMetadata {
-    let mut encoder = opaque::Encoder::new(vec![]);
-    encoder.emit_raw_bytes(METADATA_HEADER).unwrap();
+    let mut encoder = opaque::Encoder::new();
+    encoder.emit_raw_bytes(METADATA_HEADER);
 
     // Will be filled with the root position after encoding everything.
-    encoder.emit_raw_bytes(&[0, 0, 0, 0]).unwrap();
+    encoder.emit_raw_bytes(&[0, 0, 0, 0]);
 
     let source_map_files = tcx.sess.source_map().files();
     let source_file_cache = (source_map_files[0].clone(), 0);
@@ -2223,13 +2209,13 @@ fn encode_metadata_impl(tcx: TyCtxt<'_>) -> EncodedMetadata {
     };
 
     // Encode the rustc version string in a predictable location.
-    rustc_version().encode(&mut ecx).unwrap();
+    rustc_version().encode(&mut ecx);
 
     // Encode all the entries and extra information in the crate,
     // culminating in the `CrateRoot` which points to all of it.
     let root = ecx.encode_crate_root();
 
-    let mut result = ecx.opaque.into_inner();
+    let mut result = ecx.opaque.finish().unwrap();
 
     // Encode the root position.
     let header = METADATA_HEADER.len();

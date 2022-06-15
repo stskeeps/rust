@@ -152,13 +152,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // fnmut vs fnonce. If so, we have to defer further processing.
                 if self.closure_kind(substs).is_none() {
                     let closure_sig = substs.as_closure().sig();
-                    let closure_sig = self
-                        .replace_bound_vars_with_fresh_vars(
-                            call_expr.span,
-                            infer::FnCall,
-                            closure_sig,
-                        )
-                        .0;
+                    let closure_sig = self.replace_bound_vars_with_fresh_vars(
+                        call_expr.span,
+                        infer::FnCall,
+                        closure_sig,
+                    );
                     let adjustments = self.adjust_steps(autoderef);
                     self.record_deferred_call_resolution(
                         def_id,
@@ -321,7 +319,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             err.span_suggestion(
                 start,
                 "consider separating array elements with a comma",
-                ",".to_string(),
+                ",",
                 Applicability::MaybeIncorrect,
             );
             return true;
@@ -408,7 +406,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         &format!(
                             "`{path}` is a unit variant, you need to write it without the parentheses",
                         ),
-                        String::new(),
+                        "",
                         Applicability::MachineApplicable,
                     );
                 }
@@ -428,7 +426,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             err.span_suggestion(
                                 callee_expr.span.shrink_to_hi(),
                                 "consider using a semicolon here",
-                                ";".to_owned(),
+                                ";",
                                 Applicability::MaybeIncorrect,
                             );
                         }
@@ -503,8 +501,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // renormalize the associated types at this point, since they
         // previously appeared within a `Binder<>` and hence would not
         // have been normalized before.
-        let fn_sig =
-            self.replace_bound_vars_with_fresh_vars(call_expr.span, infer::FnCall, fn_sig).0;
+        let fn_sig = self.replace_bound_vars_with_fresh_vars(call_expr.span, infer::FnCall, fn_sig);
         let fn_sig = self.normalize_associated_types_in(call_expr.span, fn_sig);
 
         // Call the generic checker.

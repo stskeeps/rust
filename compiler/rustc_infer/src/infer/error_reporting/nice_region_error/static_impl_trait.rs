@@ -10,7 +10,7 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::intravisit::{walk_ty, Visitor};
 use rustc_hir::{self as hir, GenericBound, Item, ItemKind, Lifetime, LifetimeName, Node, TyKind};
 use rustc_middle::ty::{
-    self, AssocItemContainer, StaticLifetimeVisitor, Ty, TyCtxt, TypeFoldable, TypeVisitor,
+    self, AssocItemContainer, StaticLifetimeVisitor, Ty, TyCtxt, TypeSuperFoldable, TypeVisitor,
 };
 use rustc_span::symbol::Ident;
 use rustc_span::Span;
@@ -328,7 +328,7 @@ pub fn suggest_new_region_bound(
                         err.span_suggestion_verbose(
                             span,
                             &format!("{} `impl Trait`'s {}", consider, explicit_static),
-                            lifetime_name.clone(),
+                            &lifetime_name,
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -363,7 +363,7 @@ pub fn suggest_new_region_bound(
                             captures = captures,
                             explicit = explicit,
                         ),
-                        plus_lt.clone(),
+                        &plus_lt,
                         Applicability::MaybeIncorrect,
                     );
                 }
@@ -378,7 +378,7 @@ pub fn suggest_new_region_bound(
                             captures = captures,
                             explicit = explicit,
                         ),
-                        plus_lt.clone(),
+                        &plus_lt,
                         Applicability::MaybeIncorrect,
                     );
                 }
@@ -391,7 +391,7 @@ pub fn suggest_new_region_bound(
                         err.span_suggestion_verbose(
                             lt.span,
                             &format!("{} trait object's {}", consider, explicit_static),
-                            lifetime_name.clone(),
+                            &lifetime_name,
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -535,7 +535,7 @@ impl<'a, 'tcx> NiceRegionError<'a, 'tcx> {
                 err.span_suggestion_verbose(
                     span.shrink_to_hi(),
                     "consider relaxing the implicit `'static` requirement",
-                    " + '_".to_string(),
+                    " + '_",
                     Applicability::MaybeIncorrect,
                 );
                 suggested = true;

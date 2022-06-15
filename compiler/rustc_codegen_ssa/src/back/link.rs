@@ -1003,10 +1003,14 @@ fn link_natively<'a, B: ArchiveBuilder<'a>>(
     let strip = strip_value(sess);
 
     if sess.target.is_like_osx {
-        match strip {
-            Strip::Debuginfo => strip_symbols_in_osx(sess, &out_filename, Some("-S")),
-            Strip::Symbols => strip_symbols_in_osx(sess, &out_filename, None),
-            Strip::None => {}
+        match (strip, crate_type) {
+            (Strip::Debuginfo, _) => strip_symbols_in_osx(sess, &out_filename, Some("-S")),
+            // Per the manpage, `-x` is the maximum safe strip level for dynamic libraries. (#93988)
+            (Strip::Symbols, CrateType::Dylib | CrateType::Cdylib | CrateType::ProcMacro) => {
+                strip_symbols_in_osx(sess, &out_filename, Some("-x"))
+            }
+            (Strip::Symbols, _) => strip_symbols_in_osx(sess, &out_filename, None),
+            (Strip::None, _) => {}
         }
     }
 }
@@ -1952,7 +1956,7 @@ fn linker_with_args<'a, B: ArchiveBuilder<'a>>(
         add_local_native_libraries(cmd, sess, codegen_results);
     }
 
-    // Upstream rust libraries and their nobundle static libraries
+    // Upstream rust libraries and their non-bundled static libraries
     add_upstream_rust_crates::<B>(cmd, sess, codegen_results, crate_type, tmpdir);
 
     // Upstream dynamic native libraries linked with `#[link]` attributes at and `-l`
@@ -2237,7 +2241,7 @@ fn add_local_native_libraries(
     }
 }
 
-/// # Linking Rust crates and their nobundle static libraries
+/// # Linking Rust crates and their non-bundled static libraries
 ///
 /// Rust crates are not considered at all when creating an rlib output. All dependencies will be
 /// linked when producing the final output (instead of the intermediate rlib version).
@@ -2602,7 +2606,7 @@ fn add_apple_sdk(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor) {
     let os = &sess.target.os;
     let llvm_target = &sess.target.llvm_target;
     if sess.target.vendor != "apple"
-        || !matches!(os.as_ref(), "ios" | "tvos")
+        || !matches!(os.as_ref(), "ios" | "tvos" | "watchos")
         || flavor != LinkerFlavor::Gcc
     {
         return;
@@ -2612,11 +2616,16 @@ fn add_apple_sdk(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor) {
         ("x86_64", "tvos") => "appletvsimulator",
         ("arm", "ios") => "iphoneos",
         ("aarch64", "ios") if llvm_target.contains("macabi") => "macosx",
-        ("aarch64", "ios") if llvm_target.contains("sim") => "iphonesimulator",
+        ("aarch64", "ios") if llvm_target.ends_with("-simulator") => "iphonesimulator",
         ("aarch64", "ios") => "iphoneos",
         ("x86", "ios") => "iphonesimulator",
         ("x86_64", "ios") if llvm_target.contains("macabi") => "macosx",
         ("x86_64", "ios") => "iphonesimulator",
+        ("x86_64", "watchos") => "watchsimulator",
+        ("arm64_32", "watchos") => "watchos",
+        ("aarch64", "watchos") if llvm_target.ends_with("-simulator") => "watchsimulator",
+        ("aarch64", "watchos") => "watchos",
+        ("arm", "watchos") => "watchos",
         _ => {
             sess.err(&format!("unsupported arch `{}` for os `{}`", arch, os));
             return;
@@ -2663,6 +2672,11 @@ fn get_apple_sdk_root(sdk_name: &str) -> Result<String, String> {
             "macosx10.15"
                 if sdkroot.contains("iPhoneOS.platform")
                     || sdkroot.contains("iPhoneSimulator.platform") => {}
+            "watchos"
+                if sdkroot.contains("WatchSimulator.platform")
+                    || sdkroot.contains("MacOSX.platform") => {}
+            "watchsimulator"
+                if sdkroot.contains("WatchOS.platform") || sdkroot.contains("MacOSX.platform") => {}
             // Ignore `SDKROOT` if it's not a valid path.
             _ if !p.is_absolute() || p == Path::new("/") || !p.exists() => {}
             _ => return Ok(sdkroot),

@@ -15,14 +15,13 @@ use rustc_hir::ItemKind;
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
 use rustc_infer::infer::outlives::obligations::TypeOutlives;
 use rustc_infer::infer::region_constraints::GenericKind;
-use rustc_infer::infer::{self, RegionckMode};
-use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
+use rustc_infer::infer::{self, InferCtxt, TyCtxtInferExt};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::subst::{GenericArgKind, InternalSubsts, Subst};
 use rustc_middle::ty::trait_def::TraitSpecializationKind;
 use rustc_middle::ty::{
     self, AdtKind, EarlyBinder, GenericParamDefKind, ToPredicate, Ty, TyCtxt, TypeFoldable,
-    TypeVisitor,
+    TypeSuperFoldable, TypeVisitor,
 };
 use rustc_session::parse::feature_err;
 use rustc_span::symbol::{sym, Ident, Symbol};
@@ -421,7 +420,7 @@ fn check_gat_where_clauses(tcx: TyCtxt<'_>, associated_items: &[hir::TraitItemRe
 
             let suggestion = format!(
                 "{} {}",
-                if !gat_item_hir.generics.predicates.is_empty() { "," } else { " where" },
+                gat_item_hir.generics.add_where_or_trailing_comma(),
                 unsatisfied_bounds.join(", "),
             );
             err.span_suggestion(
@@ -650,11 +649,7 @@ fn resolve_regions_with_wf_tys<'tcx>(
 
         add_constraints(&infcx, region_bound_pairs);
 
-        let errors = infcx.resolve_regions(
-            id.expect_owner().to_def_id(),
-            &outlives_environment,
-            RegionckMode::default(),
-        );
+        let errors = infcx.resolve_regions(id.expect_owner().to_def_id(), &outlives_environment);
 
         debug!(?errors, "errors");
 
@@ -1387,7 +1382,7 @@ fn check_where_clauses<'tcx, 'fcx>(
                 }
 
                 fn visit_const(&mut self, c: ty::Const<'tcx>) -> ControlFlow<Self::BreakTy> {
-                    if let ty::ConstKind::Param(param) = c.val() {
+                    if let ty::ConstKind::Param(param) = c.kind() {
                         self.params.insert(param.index);
                     }
                     c.super_visit_with(self)

@@ -23,11 +23,13 @@ use rustc_hir::def::{CtorOf, DefKind, Namespace, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{walk_generics, Visitor as _};
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{GenericArg, GenericArgs};
+use rustc_hir::{GenericArg, GenericArgs, OpaqueTyOrigin};
 use rustc_middle::middle::stability::AllowUnstable;
 use rustc_middle::ty::subst::{self, GenericArgKind, InternalSubsts, Subst, SubstsRef};
 use rustc_middle::ty::GenericParamDefKind;
-use rustc_middle::ty::{self, Const, DefIdTree, EarlyBinder, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{
+    self, Const, DefIdTree, EarlyBinder, IsSuggestable, Ty, TyCtxt, TypeFoldable,
+};
 use rustc_session::lint::builtin::{AMBIGUOUS_ASSOCIATED_ITEMS, BARE_TRAIT_OBJECTS};
 use rustc_span::edition::Edition;
 use rustc_span::lev_distance::find_best_match_for_name;
@@ -1577,18 +1579,17 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         name: Symbol,
     ) -> ErrorGuaranteed {
         let mut err = struct_span_err!(self.tcx().sess, span, E0223, "ambiguous associated type");
-        if let (true, Ok(snippet)) = (
-            self.tcx()
-                .resolutions(())
-                .confused_type_with_std_module
-                .keys()
-                .any(|full_span| full_span.contains(span)),
-            self.tcx().sess.source_map().span_to_snippet(span),
-        ) {
+        if self
+            .tcx()
+            .resolutions(())
+            .confused_type_with_std_module
+            .keys()
+            .any(|full_span| full_span.contains(span))
+        {
             err.span_suggestion(
-                span,
+                span.shrink_to_lo(),
                 "you are looking for the module in `std`, not the primitive type",
-                format!("std::{}", snippet),
+                "std::",
                 Applicability::MachineApplicable,
             );
         } else {
@@ -1819,7 +1820,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                                 err.span_suggestion_verbose(
                                     args_span,
                                     &format!("{type_name} doesn't have generic parameters"),
-                                    String::new(),
+                                    "",
                                     Applicability::MachineApplicable,
                                 );
                                 return;
@@ -1945,7 +1946,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                         err.span_suggestion(
                             assoc_ident.span,
                             "there is a variant with a similar name",
-                            suggested_name.to_string(),
+                            suggested_name,
                             Applicability::MaybeIncorrect,
                         );
                     } else {
@@ -2421,7 +2422,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                         err.span_suggestion_verbose(
                             ident.span.shrink_to_hi().to(args.span_ext),
                             "the `Self` type doesn't accept type parameters",
-                            String::new(),
+                            "",
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -2472,7 +2473,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                                 err.span_suggestion_verbose(
                                     segment.ident.span.shrink_to_hi().to(args.span_ext),
                                     "the `Self` type doesn't accept type parameters",
-                                    String::new(),
+                                    "",
                                     Applicability::MachineApplicable,
                                 );
                                 return;
@@ -2548,7 +2549,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                             err.span_suggestion_verbose(
                                 segment.ident.span.shrink_to_hi().to(args.span_ext),
                                 &format!("primitive type `{name}` doesn't have generic parameters"),
-                                String::new(),
+                                "",
                                 Applicability::MaybeIncorrect,
                             );
                         }
@@ -2628,16 +2629,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 let def_id = item_id.def_id.to_def_id();
 
                 match opaque_ty.kind {
-                    hir::ItemKind::OpaqueTy(hir::OpaqueTy { origin, .. }) => self
-                        .impl_trait_ty_to_ty(
-                            def_id,
-                            lifetimes,
-                            matches!(
-                                origin,
-                                hir::OpaqueTyOrigin::FnReturn(..)
-                                    | hir::OpaqueTyOrigin::AsyncFn(..)
-                            ),
-                        ),
+                    hir::ItemKind::OpaqueTy(hir::OpaqueTy { origin, .. }) => {
+                        self.impl_trait_ty_to_ty(def_id, lifetimes, origin)
+                    }
                     ref i => bug!("`impl Trait` pointed to non-opaque type?? {:#?}", i),
                 }
             }
@@ -2706,7 +2700,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         &self,
         def_id: DefId,
         lifetimes: &[hir::GenericArg<'_>],
-        replace_parent_lifetimes: bool,
+        origin: OpaqueTyOrigin,
     ) -> Ty<'tcx> {
         debug!("impl_trait_ty_to_ty(def_id={:?}, lifetimes={:?})", def_id, lifetimes);
         let tcx = self.tcx();
@@ -2736,7 +2730,12 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     // For `impl Trait` in the types of statics, constants,
                     // locals and type aliases. These capture all parent
                     // lifetimes, so they can use their identity subst.
-                    GenericParamDefKind::Lifetime if replace_parent_lifetimes => {
+                    GenericParamDefKind::Lifetime
+                        if matches!(
+                            origin,
+                            hir::OpaqueTyOrigin::FnReturn(..) | hir::OpaqueTyOrigin::AsyncFn(..)
+                        ) =>
+                    {
                         tcx.lifetimes.re_static.into()
                     }
                     _ => tcx.mk_param_from_def(param),

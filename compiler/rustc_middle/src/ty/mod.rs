@@ -9,7 +9,9 @@
 //!
 //! ["The `ty` module: representing types"]: https://rustc-dev-guide.rust-lang.org/ty.html
 
-pub use self::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeVisitor};
+pub use self::fold::{
+    FallibleTypeFolder, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitor,
+};
 pub use self::AssocItemContainer::*;
 pub use self::BorrowKind::*;
 pub use self::IntVarValue::*;
@@ -20,7 +22,6 @@ use crate::mir::{Body, GeneratorLayout};
 use crate::traits::{self, Reveal};
 use crate::ty;
 use crate::ty::fast_reject::SimplifiedType;
-use crate::ty::subst::{GenericArg, InternalSubsts, Subst, SubstsRef};
 use crate::ty::util::Discr;
 pub use adt::*;
 pub use assoc::*;
@@ -41,7 +42,8 @@ use rustc_query_system::ich::StableHashingContext;
 use rustc_session::cstore::CrateStoreDyn;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::Span;
-use rustc_target::abi::Align;
+use rustc_target::abi::{Align, VariantIdx};
+pub use subst::*;
 pub use vtable::*;
 
 use std::fmt::Debug;
@@ -1434,7 +1436,7 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for ParamEnv<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for ParamEnv<'tcx> {
-    fn try_super_fold_with<F: ty::fold::FallibleTypeFolder<'tcx>>(
+    fn try_fold_with<F: ty::fold::FallibleTypeFolder<'tcx>>(
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
@@ -1445,7 +1447,7 @@ impl<'tcx> TypeFoldable<'tcx> for ParamEnv<'tcx> {
         ))
     }
 
-    fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
+    fn visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
         self.caller_bounds().visit_with(visitor)?;
         self.reveal().visit_with(visitor)?;
         self.constness().visit_with(visitor)
@@ -2159,22 +2161,28 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     /// Returns the possibly-auto-generated MIR of a `(DefId, Subst)` pair.
+    #[instrument(skip(self), level = "debug")]
     pub fn instance_mir(self, instance: ty::InstanceDef<'tcx>) -> &'tcx Body<'tcx> {
         match instance {
-            ty::InstanceDef::Item(def) => match self.def_kind(def.did) {
-                DefKind::Const
-                | DefKind::Static(..)
-                | DefKind::AssocConst
-                | DefKind::Ctor(..)
-                | DefKind::AnonConst
-                | DefKind::InlineConst => self.mir_for_ctfe_opt_const_arg(def),
-                // If the caller wants `mir_for_ctfe` of a function they should not be using
-                // `instance_mir`, so we'll assume const fn also wants the optimized version.
-                _ => {
-                    assert_eq!(def.const_param_did, None);
-                    self.optimized_mir(def.did)
+            ty::InstanceDef::Item(def) => {
+                debug!("calling def_kind on def: {:?}", def);
+                let def_kind = self.def_kind(def.did);
+                debug!("returned from def_kind: {:?}", def_kind);
+                match def_kind {
+                    DefKind::Const
+                    | DefKind::Static(..)
+                    | DefKind::AssocConst
+                    | DefKind::Ctor(..)
+                    | DefKind::AnonConst
+                    | DefKind::InlineConst => self.mir_for_ctfe_opt_const_arg(def),
+                    // If the caller wants `mir_for_ctfe` of a function they should not be using
+                    // `instance_mir`, so we'll assume const fn also wants the optimized version.
+                    _ => {
+                        assert_eq!(def.const_param_did, None);
+                        self.optimized_mir(def.did)
+                    }
                 }
-            },
+            }
             ty::InstanceDef::VtableShim(..)
             | ty::InstanceDef::ReifyShim(..)
             | ty::InstanceDef::Intrinsic(..)
@@ -2444,4 +2452,11 @@ pub struct FoundRelationships {
     /// This is true if we identified that this Ty (`?T`) is found in a `<_ as
     /// _>::AssocType = ?T`
     pub output: bool,
+}
+
+/// The constituent parts of a type level constant of kind ADT or array.
+#[derive(Copy, Clone, Debug, HashStable)]
+pub struct DestructuredConst<'tcx> {
+    pub variant: Option<VariantIdx>,
+    pub fields: &'tcx [ty::Const<'tcx>],
 }

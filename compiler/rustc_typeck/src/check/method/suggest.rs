@@ -327,26 +327,22 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     );
                 }
                 if let Some(span) = tcx.resolutions(()).confused_type_with_std_module.get(&span) {
-                    if let Ok(snippet) = tcx.sess.source_map().span_to_snippet(*span) {
-                        err.span_suggestion(
-                            *span,
-                            "you are looking for the module in `std`, \
-                                     not the primitive type",
-                            format!("std::{}", snippet),
-                            Applicability::MachineApplicable,
-                        );
-                    }
+                    err.span_suggestion(
+                        span.shrink_to_lo(),
+                        "you are looking for the module in `std`, not the primitive type",
+                        "std::",
+                        Applicability::MachineApplicable,
+                    );
                 }
                 if let ty::RawPtr(_) = &actual.kind() {
                     err.note(
                         "try using `<*const T>::as_ref()` to get a reference to the \
-                                      type behind the pointer: https://doc.rust-lang.org/std/\
-                                      primitive.pointer.html#method.as_ref",
+                         type behind the pointer: https://doc.rust-lang.org/std/\
+                         primitive.pointer.html#method.as_ref",
                     );
                     err.note(
-                        "using `<*const T>::as_ref()` on a pointer \
-                                      which is unaligned or points to invalid \
-                                      or uninitialized memory is undefined behavior",
+                        "using `<*const T>::as_ref()` on a pointer which is unaligned or points \
+                         to invalid or uninitialized memory is undefined behavior",
                     );
                 }
 
@@ -457,7 +453,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         err.span_suggestion_short(
                             span,
                             msg,
-                            String::from("len"),
+                            "len",
                             Applicability::MachineApplicable,
                         );
                     } else {
@@ -542,10 +538,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 };
                                 if let Some(hir::Node::Item(hir::Item { kind, .. })) = node {
                                     if let Some(g) = kind.generics() {
-                                        let key = match g.predicates {
-                                            [.., pred] => (pred.span().shrink_to_hi(), false),
-                                            [] => (g.span_for_predicates_or_empty_place(), true),
-                                        };
+                                        let key = (
+                                            g.tail_span_for_predicate_suggestion(),
+                                            g.add_where_or_trailing_comma(),
+                                        );
                                         type_params
                                             .entry(key)
                                             .or_insert_with(FxHashSet::default)
@@ -809,7 +805,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         .enumerate()
                         .collect::<Vec<(usize, String)>>();
 
-                    for ((span, empty_where), obligations) in type_params.into_iter() {
+                    for ((span, add_where_or_comma), obligations) in type_params.into_iter() {
                         restrict_type_params = true;
                         // #74886: Sort here so that the output is always the same.
                         let mut obligations = obligations.into_iter().collect::<Vec<_>>();
@@ -821,11 +817,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                  trait bound{s}",
                                 s = pluralize!(obligations.len())
                             ),
-                            format!(
-                                "{} {}",
-                                if empty_where { " where" } else { "," },
-                                obligations.join(", ")
-                            ),
+                            format!("{} {}", add_where_or_comma, obligations.join(", ")),
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -901,7 +893,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 item_name.span,
                                 "because of the in-memory representation of `&str`, to obtain \
                                  an `Iterator` over each of its codepoint use method `chars`",
-                                String::from("chars"),
+                                "chars",
                                 Applicability::MachineApplicable,
                             );
                         }
@@ -1014,7 +1006,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         err.span_suggestion(
                             span,
                             "there is a variant with a similar name",
-                            suggestion.to_string(),
+                            suggestion,
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -1027,12 +1019,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         let call_expr =
                             self.tcx.hir().expect_expr(self.tcx.hir().get_parent_node(expr.hir_id));
                         if let Some(span) = call_expr.span.trim_start(expr.span) {
-                            err.span_suggestion(
-                                span,
-                                msg,
-                                String::new(),
-                                Applicability::MachineApplicable,
-                            );
+                            err.span_suggestion(span, msg, "", Applicability::MachineApplicable);
                             fallback_span = false;
                         }
                     }
@@ -1051,7 +1038,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 def_kind.article(),
                                 def_kind.descr(lev_candidate.def_id),
                             ),
-                            lev_candidate.name.to_string(),
+                            lev_candidate.name,
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -1172,7 +1159,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         err.span_suggestion(
                             span,
                             "remove the arguments",
-                            String::new(),
+                            "",
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -1426,7 +1413,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             "use the `?` operator to extract the `{self_ty}` value, propagating \
                             {article} `{kind}::{variant}` value to the caller"
                         ),
-                        "?".to_owned(),
+                        "?",
                         Applicability::MachineApplicable,
                     );
                 } else {
@@ -1436,7 +1423,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             "consider using `{kind}::expect` to unwrap the `{self_ty}` value, \
                              panicking if the value is {article} `{kind}::{variant}`"
                         ),
-                        ".expect(\"REASON\")".to_owned(),
+                        ".expect(\"REASON\")",
                         Applicability::HasPlaceholders,
                     );
                 }
@@ -1640,7 +1627,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             err.span_suggestion_verbose(
                 span.shrink_to_lo(),
                 "consider `await`ing on the `Future` and calling the method on its `Output`",
-                "await.".to_string(),
+                "await.",
                 Applicability::MaybeIncorrect,
             );
         }

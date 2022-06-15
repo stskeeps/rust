@@ -421,14 +421,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         let object_trait_ref = data.principal().unwrap_or_else(|| {
             span_bug!(obligation.cause.span, "object candidate with no principal")
         });
-        let object_trait_ref = self
-            .infcx
-            .replace_bound_vars_with_fresh_vars(
-                obligation.cause.span,
-                HigherRankedType,
-                object_trait_ref,
-            )
-            .0;
+        let object_trait_ref = self.infcx.replace_bound_vars_with_fresh_vars(
+            obligation.cause.span,
+            HigherRankedType,
+            object_trait_ref,
+        );
         let object_trait_ref = object_trait_ref.with_self_ty(self.tcx(), self_ty);
 
         let mut nested = vec![];
@@ -545,7 +542,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                                 bound_vars.push(bound_var);
                                 tcx.mk_const(ty::ConstS {
                                     ty: tcx.type_of(param.def_id),
-                                    val: ty::ConstKind::Bound(
+                                    kind: ty::ConstKind::Bound(
                                         ty::INNERMOST,
                                         ty::BoundVar::from_usize(bound_vars.len() - 1),
                                     ),
@@ -992,7 +989,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     // Lifetimes aren't allowed to change during unsizing.
                     GenericArgKind::Lifetime(_) => None,
 
-                    GenericArgKind::Const(ct) => match ct.val() {
+                    GenericArgKind::Const(ct) => match ct.kind() {
                         ty::ConstKind::Param(p) => Some(p.index),
                         _ => None,
                     },

@@ -547,23 +547,6 @@ pub enum PrintRequest {
     LinkArgs,
 }
 
-#[derive(Copy, Clone)]
-pub enum BorrowckMode {
-    Mir,
-    Migrate,
-}
-
-impl BorrowckMode {
-    /// Returns whether we should run the MIR-based borrow check, but also fall back
-    /// on the AST borrow check if the MIR-based one errors.
-    pub fn migrate(self) -> bool {
-        match self {
-            BorrowckMode::Mir => false,
-            BorrowckMode::Migrate => true,
-        }
-    }
-}
-
 pub enum Input {
     /// Load source code from a file.
     File(PathBuf),
@@ -1937,21 +1920,6 @@ fn parse_native_lib_kind(
 
     let kind = match kind {
         "static" => NativeLibKind::Static { bundle: None, whole_archive: None },
-        "static-nobundle" => {
-            early_warn(
-                error_format,
-                "library kind `static-nobundle` has been superseded by specifying \
-                 modifier `-bundle` with library kind `static`. Try `static:-bundle`",
-            );
-            if !nightly_options::match_is_nightly_build(matches) {
-                early_error(
-                    error_format,
-                    "library kind `static-nobundle` is unstable \
-                     and only accepted on the nightly compiler",
-                );
-            }
-            NativeLibKind::Static { bundle: Some(false), whole_archive: None }
-        }
         "dylib" => NativeLibKind::Dylib { as_needed: None },
         "framework" => NativeLibKind::Framework { as_needed: None },
         _ => early_error(
@@ -2004,10 +1972,7 @@ fn parse_native_lib_modifiers(
             }
         };
         match (modifier, &mut kind) {
-            ("bundle", NativeLibKind::Static { bundle, .. }) => {
-                report_unstable_modifier();
-                assign_modifier(bundle)
-            }
+            ("bundle", NativeLibKind::Static { bundle, .. }) => assign_modifier(bundle),
             ("bundle", _) => early_error(
                 error_format,
                 "linking modifier `bundle` is only compatible with `static` linking kind",

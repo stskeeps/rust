@@ -20,7 +20,7 @@ use rustc_infer::infer::outlives::env::RegionBoundPairs;
 use rustc_infer::infer::region_constraints::RegionConstraintData;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_infer::infer::{
-    InferCtxt, InferOk, LateBoundRegionConversionTime, NllRegionVariableOrigin,
+    InferCtxt, InferOk, LateBoundRegion, LateBoundRegionConversionTime, NllRegionVariableOrigin,
 };
 use rustc_middle::mir::tcx::PlaceTy;
 use rustc_middle::mir::visit::{NonMutatingUseContext, PlaceContext, Visitor};
@@ -378,7 +378,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
         } else {
             let tcx = self.tcx();
             let maybe_uneval = match constant.literal {
-                ConstantKind::Ty(ct) => match ct.val() {
+                ConstantKind::Ty(ct) => match ct.kind() {
                     ty::ConstKind::Unevaluated(uv) => Some(uv),
                     _ => None,
                 },
@@ -1436,11 +1436,13 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         return;
                     }
                 };
-                let (sig, map) = self.infcx.replace_bound_vars_with_fresh_vars(
-                    term.source_info.span,
-                    LateBoundRegionConversionTime::FnCall,
-                    sig,
-                );
+                let (sig, map) = tcx.replace_late_bound_regions(sig, |br| {
+                    self.infcx.next_region_var(LateBoundRegion(
+                        term.source_info.span,
+                        br.kind,
+                        LateBoundRegionConversionTime::FnCall,
+                    ))
+                });
                 debug!(?sig);
                 let sig = self.normalize(sig, term_location);
                 self.check_call_dest(body, term, &sig, *destination, target, term_location);
@@ -1839,7 +1841,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     fn check_operand(&mut self, op: &Operand<'tcx>, location: Location) {
         if let Operand::Constant(constant) = op {
             let maybe_uneval = match constant.literal {
-                ConstantKind::Ty(ct) => match ct.val() {
+                ConstantKind::Ty(ct) => match ct.kind() {
                     ty::ConstKind::Unevaluated(uv) => Some(uv),
                     _ => None,
                 },

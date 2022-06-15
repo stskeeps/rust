@@ -146,6 +146,8 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         let is_expected = &|res| source.is_expected(res);
         let is_enum_variant = &|res| matches!(res, Res::Def(DefKind::Variant, _));
 
+        debug!(?res, ?source);
+
         // Make the base error.
         struct BaseError<'a> {
             msg: String,
@@ -250,6 +252,8 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         let mut err =
             self.r.session.struct_span_err_with_code(base_error.span, &base_error.msg, code);
 
+        self.suggest_swapping_misplaced_self_ty_and_trait(&mut err, source, res, base_error.span);
+
         if let Some(sugg) = base_error.suggestion {
             err.span_suggestion_verbose(sugg.0, sugg.1, sugg.2, Applicability::MaybeIncorrect);
         }
@@ -265,13 +269,21 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
             );
         }
         match (source, self.diagnostic_metadata.in_if_condition) {
-            (PathSource::Expr(_), Some(Expr { span, kind: ExprKind::Assign(..), .. })) => {
-                err.span_suggestion_verbose(
-                    span.shrink_to_lo(),
-                    "you might have meant to use pattern matching",
-                    "let ".to_string(),
-                    Applicability::MaybeIncorrect,
-                );
+            (
+                PathSource::Expr(_),
+                Some(Expr { span: expr_span, kind: ExprKind::Assign(lhs, _, _), .. }),
+            ) => {
+                // Icky heuristic so we don't suggest:
+                // `if (i + 2) = 2` => `if let (i + 2) = 2` (approximately pattern)
+                // `if 2 = i` => `if let 2 = i` (lhs needs to contain error span)
+                if lhs.is_approximately_pattern() && lhs.span.contains(span) {
+                    err.span_suggestion_verbose(
+                        expr_span.shrink_to_lo(),
+                        "you might have meant to use pattern matching",
+                        "let ",
+                        Applicability::MaybeIncorrect,
+                    );
+                }
             }
             _ => {}
         }
@@ -282,7 +294,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
             err.span_suggestion_short(
                 span,
                 "you might have meant to use `self` here instead",
-                "self".to_string(),
+                "self",
                 Applicability::MaybeIncorrect,
             );
             if !self.self_value_is_available(path[0].ident.span) {
@@ -305,7 +317,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         span,
                         "if you meant to use `self`, you are also missing a `self` receiver \
                          argument",
-                        sugg.to_string(),
+                        sugg,
                         Applicability::MaybeIncorrect,
                     );
                 }
@@ -364,7 +376,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         err.span_suggestion_verbose(
                             span,
                             "add a `self` receiver parameter to make the associated `fn` a method",
-                            sugg.to_string(),
+                            sugg,
                             Applicability::MaybeIncorrect,
                         );
                         "doesn't"
@@ -600,7 +612,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         err.span_suggestion_short(
                             pat_sp.between(ty_sp),
                             "use `=` if you meant to assign",
-                            " = ".to_string(),
+                            " = ",
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -630,7 +642,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                                 err.span_suggestion(
                                     span,
                                     "use the similarly named label",
-                                    label_ident.name.to_string(),
+                                    label_ident.name,
                                     Applicability::MaybeIncorrect,
                                 );
                                 // Do not lint against unused label when we suggest them.
@@ -644,7 +656,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                     err.span_suggestion(
                         span,
                         "perhaps you intended to use this type",
-                        correct.to_string(),
+                        correct,
                         Applicability::MaybeIncorrect,
                     );
                 }
@@ -675,12 +687,41 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         err.span_suggestion_verbose(
                             constraint.ident.span.between(trait_ref.span),
                             "you might have meant to write a path instead of an associated type bound",
-                            "::".to_string(),
+                            "::",
                             Applicability::MachineApplicable,
                         );
                     }
                 }
             }
+        }
+    }
+
+    fn suggest_swapping_misplaced_self_ty_and_trait(
+        &mut self,
+        err: &mut Diagnostic,
+        source: PathSource<'_>,
+        res: Option<Res>,
+        span: Span,
+    ) {
+        if let Some((trait_ref, self_ty)) =
+            self.diagnostic_metadata.currently_processing_impl_trait.clone()
+            && let TyKind::Path(_, self_ty_path) = &self_ty.kind
+            && let PathResult::Module(ModuleOrUniformRoot::Module(module)) =
+                self.resolve_path(&Segment::from_path(self_ty_path), Some(TypeNS), None)
+            && let ModuleKind::Def(DefKind::Trait, ..) = module.kind
+            && trait_ref.path.span == span
+            && let PathSource::Trait(_) = source
+            && let Some(Res::Def(DefKind::Struct | DefKind::Enum | DefKind::Union, _)) = res
+            && let Ok(self_ty_str) =
+                self.r.session.source_map().span_to_snippet(self_ty.span)
+            && let Ok(trait_ref_str) =
+                self.r.session.source_map().span_to_snippet(trait_ref.path.span)
+        {
+                err.multipart_suggestion(
+                    "`impl` items mention the trait being implemented first and the type it is being implemented for second",
+                    vec![(trait_ref.path.span, self_ty_str), (self_ty.span, trait_ref_str)],
+                    Applicability::MaybeIncorrect,
+                );
         }
     }
 
@@ -1038,7 +1079,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 err.span_suggestion_verbose(
                     span.shrink_to_hi(),
                     "use `!` to invoke the macro",
-                    "!".to_string(),
+                    "!",
                     Applicability::MaybeIncorrect,
                 );
                 if path_str == "try" && span.rust_2015() {
@@ -1187,7 +1228,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         err.span_suggestion(
                             span,
                             "use this syntax instead",
-                            path_str.to_string(),
+                            path_str,
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -1466,7 +1507,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         err.span_suggestion_short(
                             colon_sp,
                             "maybe you meant to write `;` here",
-                            ";".to_string(),
+                            ";",
                             Applicability::MaybeIncorrect,
                         );
                     } else {
@@ -1477,7 +1518,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                             err.span_suggestion(
                                 colon_sp,
                                 "maybe you meant to write a path separator here",
-                                "::".to_string(),
+                                "::",
                                 Applicability::MaybeIncorrect,
                             );
                             show_label = false;

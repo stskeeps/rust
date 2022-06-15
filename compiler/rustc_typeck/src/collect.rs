@@ -39,7 +39,7 @@ use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::util::Discr;
 use rustc_middle::ty::util::IntTypeExt;
-use rustc_middle::ty::{self, AdtKind, Const, DefIdTree, Ty, TyCtxt};
+use rustc_middle::ty::{self, AdtKind, Const, DefIdTree, IsSuggestable, Ty, TyCtxt};
 use rustc_middle::ty::{ReprOptions, ToPredicate};
 use rustc_session::lint;
 use rustc_session::parse::feature_err;
@@ -449,8 +449,9 @@ impl<'tcx> AstConv<'tcx> for ItemCtxt<'tcx> {
                                     format!(
                                         "{}::",
                                         // Replace the existing lifetimes with a new named lifetime.
-                                        self.tcx
-                                            .replace_late_bound_regions(poly_trait_ref, |_| {
+                                        self.tcx.replace_late_bound_regions_uncached(
+                                            poly_trait_ref,
+                                            |_| {
                                                 self.tcx.mk_region(ty::ReEarlyBound(
                                                     ty::EarlyBoundRegion {
                                                         def_id: item_def_id,
@@ -458,8 +459,8 @@ impl<'tcx> AstConv<'tcx> for ItemCtxt<'tcx> {
                                                         name: Symbol::intern(&lt_name),
                                                     },
                                                 ))
-                                            })
-                                            .0,
+                                            }
+                                        ),
                                     ),
                                 ),
                             ];
@@ -805,8 +806,7 @@ fn convert_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
                 hir::ItemKind::Fn(..) => tcx.ensure().fn_sig(def_id),
                 hir::ItemKind::OpaqueTy(..) => tcx.ensure().item_bounds(def_id),
                 hir::ItemKind::Const(ty, ..) | hir::ItemKind::Static(ty, ..) => {
-                    // (#75889): Account for `const C: dyn Fn() -> _ = "";`
-                    if let hir::TyKind::TraitObject(..) = ty.kind {
+                    if !is_suggestable_infer_ty(ty) {
                         let mut visitor = HirPlaceholderCollector::default();
                         visitor.visit_item(it);
                         placeholder_type_error(tcx, None, visitor.0, false, None, it.kind.descr());
@@ -1929,7 +1929,7 @@ fn infer_return_ty_for_fn_sig<'tcx>(
                 diag.span_suggestion(
                     ty.span,
                     "replace with the correct return type",
-                    ret_ty.to_string(),
+                    ret_ty,
                     Applicability::MachineApplicable,
                 );
             } else if matches!(ret_ty.kind(), ty::FnDef(..)) {
@@ -1938,7 +1938,7 @@ fn infer_return_ty_for_fn_sig<'tcx>(
                     diag.span_suggestion(
                         ty.span,
                         "replace with the correct return type",
-                        fn_sig.to_string(),
+                        fn_sig,
                         Applicability::MachineApplicable,
                     );
                 }
@@ -2352,7 +2352,7 @@ fn const_evaluatable_predicates_of<'tcx>(
         fn visit_anon_const(&mut self, c: &'tcx hir::AnonConst) {
             let def_id = self.tcx.hir().local_def_id(c.hir_id);
             let ct = ty::Const::from_anon_const(self.tcx, def_id);
-            if let ty::ConstKind::Unevaluated(uv) = ct.val() {
+            if let ty::ConstKind::Unevaluated(uv) = ct.kind() {
                 assert_eq!(uv.promoted, None);
                 let span = self.tcx.hir().span(c.hir_id);
                 self.preds.insert((
@@ -2583,7 +2583,7 @@ fn from_target_feature(
     let Some(list) = attr.meta_item_list() else { return };
     let bad_item = |span| {
         let msg = "malformed `target_feature` attribute input";
-        let code = "enable = \"..\"".to_owned();
+        let code = "enable = \"..\"";
         tcx.sess
             .struct_span_err(span, msg)
             .span_suggestion(span, "must be of the form", code, Applicability::HasPlaceholders)

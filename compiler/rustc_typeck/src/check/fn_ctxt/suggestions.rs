@@ -15,7 +15,7 @@ use rustc_infer::infer::{self, TyCtxtInferExt};
 use rustc_infer::traits;
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::subst::GenericArgKind;
-use rustc_middle::ty::{self, Binder, ToPredicate, Ty};
+use rustc_middle::ty::{self, Binder, IsSuggestable, ToPredicate, Ty};
 use rustc_span::symbol::{kw, sym};
 use rustc_span::Span;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
@@ -27,7 +27,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         err.span_suggestion_short(
             span.shrink_to_hi(),
             "consider using a semicolon here",
-            ";".to_string(),
+            ";",
             Applicability::MachineApplicable,
         );
     }
@@ -85,7 +85,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             _ => return false,
         };
 
-        let sig = self.replace_bound_vars_with_fresh_vars(expr.span, infer::FnCall, sig).0;
+        let sig = self.replace_bound_vars_with_fresh_vars(expr.span, infer::FnCall, sig);
         let sig = self.normalize_associated_types_in(expr.span, sig);
         if self.can_coerce(sig.output(), expected) {
             let (mut sugg_call, applicability) = if sig.inputs().is_empty() {
@@ -444,7 +444,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         err.span_suggestion(
                             fn_name.span,
                             "use `Box::pin` to pin and box this expression",
-                            "Box::pin".to_string(),
+                            "Box::pin",
                             Applicability::MachineApplicable,
                         );
                         true
@@ -507,7 +507,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         err.span_suggestion(
                             expression.span.shrink_to_hi(),
                             "consider using a semicolon here",
-                            ";".to_string(),
+                            ";",
                             Applicability::MachineApplicable,
                         );
                     }

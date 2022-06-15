@@ -19,7 +19,7 @@ use rustc_middle::mir::interpret::{get_slice_bytes, ConstValue};
 use rustc_middle::mir::interpret::{ErrorHandled, LitToConstError, LitToConstInput};
 use rustc_middle::mir::{self, UserTypeProjection};
 use rustc_middle::mir::{BorrowKind, Field, Mutability};
-use rustc_middle::thir::{Ascription, BindingMode, FieldPat, Pat, PatKind, PatRange};
+use rustc_middle::thir::{Ascription, BindingMode, FieldPat, LocalVarId, Pat, PatKind, PatRange};
 use rustc_middle::ty::subst::{GenericArg, SubstsRef};
 use rustc_middle::ty::CanonicalUserTypeAnnotation;
 use rustc_middle::ty::{self, AdtDef, ConstKind, DefIdTree, Region, Ty, TyCtxt, UserType};
@@ -185,11 +185,11 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
             }
             (Some(PatKind::Constant { value: lo }), None) => {
                 let hi = ty.numeric_max_val(self.tcx)?;
-                Some((*lo, hi.into()))
+                Some((*lo, mir::ConstantKind::from_const(hi, self.tcx)))
             }
             (None, Some(PatKind::Constant { value: hi })) => {
                 let lo = ty.numeric_min_val(self.tcx)?;
-                Some((lo.into(), *hi))
+                Some((mir::ConstantKind::from_const(lo, self.tcx), *hi))
             }
             _ => None,
         }
@@ -288,7 +288,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
                     mutability,
                     mode,
                     name: ident.name,
-                    var: id,
+                    var: LocalVarId(id),
                     ty: var_ty,
                     subpattern: self.lower_opt_pattern(sub),
                     is_primary: id == pat.hir_id,
@@ -553,7 +553,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
 
         match value {
             mir::ConstantKind::Ty(c) => {
-                match c.val() {
+                match c.kind() {
                     ConstKind::Param(_) => {
                         self.errors.push(PatternError::ConstParamInPattern(span));
                         return PatKind::Wild;
@@ -664,7 +664,7 @@ macro_rules! ClonePatternFoldableImpls {
 }
 
 ClonePatternFoldableImpls! { <'tcx>
-    Span, Field, Mutability, Symbol, hir::HirId, usize, ty::Const<'tcx>,
+    Span, Field, Mutability, Symbol, LocalVarId, usize, ty::Const<'tcx>,
     Region<'tcx>, Ty<'tcx>, BindingMode, AdtDef<'tcx>,
     SubstsRef<'tcx>, &'tcx GenericArg<'tcx>, UserType<'tcx>,
     UserTypeProjection, CanonicalUserTypeAnnotation<'tcx>
@@ -798,11 +798,12 @@ pub(crate) fn compare_const_vals<'tcx>(
     if let ty::Str = ty.kind() && let (
         Some(a_val @ ConstValue::Slice { .. }),
         Some(b_val @ ConstValue::Slice { .. }),
-    ) = (a.try_val(), b.try_val())
+    ) = (a.try_to_value(tcx), b.try_to_value(tcx))
     {
         let a_bytes = get_slice_bytes(&tcx, a_val);
         let b_bytes = get_slice_bytes(&tcx, b_val);
         return from_bool(a_bytes == b_bytes);
     }
+
     fallback()
 }

@@ -204,25 +204,7 @@ impl<'a> Parser<'a> {
         let mut def = || mem::replace(def, Defaultness::Final);
 
         let info = if self.eat_keyword(kw::Use) {
-            // USE ITEM
-            let tree = self.parse_use_tree()?;
-
-            // If wildcard or glob-like brace syntax doesn't have `;`,
-            // the user may not know `*` or `{}` should be the last.
-            if let Err(mut e) = self.expect_semi() {
-                match tree.kind {
-                    UseTreeKind::Glob => {
-                        e.note("the wildcard token must be last on the path");
-                    }
-                    UseTreeKind::Nested(..) => {
-                        e.note("glob-like brace syntax must be last on the path");
-                    }
-                    _ => (),
-                }
-                return Err(e);
-            }
-
-            (Ident::empty(), ItemKind::Use(tree))
+            self.parse_use_item()?
         } else if self.check_fn_front_matter(def_final) {
             // FUNCTION ITEM
             let (ident, sig, generics, body) = self.parse_fn(attrs, fn_parse_mode, lo, vis)?;
@@ -288,7 +270,12 @@ impl<'a> Parser<'a> {
         } else if let IsMacroRulesItem::Yes { has_bang } = self.is_macro_rules_item() {
             // MACRO_RULES ITEM
             self.parse_item_macro_rules(vis, has_bang)?
-        } else if vis.kind.is_pub() && self.isnt_macro_invocation() {
+        } else if self.isnt_macro_invocation()
+            && (self.token.is_ident_named(Symbol::intern("import"))
+                || self.token.is_ident_named(Symbol::intern("using")))
+        {
+            return self.recover_import_as_use();
+        } else if self.isnt_macro_invocation() && vis.kind.is_pub() {
             self.recover_missing_kw_before_item()?;
             return Ok(None);
         } else if macros_allowed && self.check_path() {
@@ -298,6 +285,48 @@ impl<'a> Parser<'a> {
             return Ok(None);
         };
         Ok(Some(info))
+    }
+
+    fn recover_import_as_use(&mut self) -> PResult<'a, Option<(Ident, ItemKind)>> {
+        let span = self.token.span;
+        let token_name = super::token_descr(&self.token);
+        let snapshot = self.create_snapshot_for_diagnostic();
+        self.bump();
+        match self.parse_use_item() {
+            Ok(u) => {
+                self.struct_span_err(span, format!("expected item, found {token_name}"))
+                    .span_suggestion_short(
+                        span,
+                        "items are imported using the `use` keyword",
+                        "use",
+                        Applicability::MachineApplicable,
+                    )
+                    .emit();
+                Ok(Some(u))
+            }
+            Err(e) => {
+                e.cancel();
+                self.restore_snapshot(snapshot);
+                Ok(None)
+            }
+        }
+    }
+
+    fn parse_use_item(&mut self) -> PResult<'a, (Ident, ItemKind)> {
+        let tree = self.parse_use_tree()?;
+        if let Err(mut e) = self.expect_semi() {
+            match tree.kind {
+                UseTreeKind::Glob => {
+                    e.note("the wildcard token must be last on the path");
+                }
+                UseTreeKind::Nested(..) => {
+                    e.note("glob-like brace syntax must be last on the path");
+                }
+                _ => (),
+            }
+            return Err(e);
+        }
+        Ok((Ident::empty(), ItemKind::Use(tree)))
     }
 
     /// When parsing a statement, would the start of a path be an item?
@@ -429,7 +458,7 @@ impl<'a> Parser<'a> {
                     err.span_suggestion(
                         path.span,
                         "perhaps you meant to define a macro",
-                        "macro_rules".to_string(),
+                        "macro_rules",
                         Applicability::MachineApplicable,
                     );
                 }
@@ -457,7 +486,7 @@ impl<'a> Parser<'a> {
                 err.span_suggestion_verbose(
                     self.token.span,
                     "consider removing this semicolon",
-                    String::new(),
+                    "",
                     Applicability::MaybeIncorrect,
                 );
             }
@@ -577,7 +606,7 @@ impl<'a> Parser<'a> {
                         .span_suggestion_short(
                             missing_for_span,
                             "add `for` here",
-                            " for ".to_string(),
+                            " for ",
                             Applicability::MachineApplicable,
                         )
                         .emit();
@@ -1053,7 +1082,7 @@ impl<'a> Parser<'a> {
             .span_suggestion(
                 span.with_hi(ident.span.lo()),
                 "try using a static value",
-                "static ".to_string(),
+                "static ",
                 Applicability::MachineApplicable,
             )
             .note("for more information, visit https://doc.rust-lang.org/std/keyword.extern.html")
@@ -1092,7 +1121,7 @@ impl<'a> Parser<'a> {
                 .span_suggestion(
                     const_span,
                     "you might want to declare a static instead",
-                    "static".to_owned(),
+                    "static",
                     Applicability::MaybeIncorrect,
                 )
                 .emit();
@@ -1526,7 +1555,7 @@ impl<'a> Parser<'a> {
                 err.span_suggestion_short(
                     self.prev_token.span,
                     "field names and their types are separated with `:`",
-                    ":".to_string(),
+                    ":",
                     Applicability::MachineApplicable,
                 );
                 err.emit();
@@ -1553,7 +1582,7 @@ impl<'a> Parser<'a> {
                 .span_suggestion_verbose(
                     self.token.span,
                     "write a path separator here",
-                    "::".to_string(),
+                    "::",
                     Applicability::MaybeIncorrect,
                 )
                 .emit();
@@ -1566,7 +1595,7 @@ impl<'a> Parser<'a> {
                 .span_suggestion(
                     sp,
                     "remove this unsupported default value",
-                    String::new(),
+                    "",
                     Applicability::MachineApplicable,
                 )
                 .emit();
@@ -1662,7 +1691,7 @@ impl<'a> Parser<'a> {
                     .span_suggestion(
                         macro_rules_span,
                         "add a `!`",
-                        "macro_rules!".to_owned(),
+                        "macro_rules!",
                         Applicability::MachineApplicable,
                     )
                     .emit();
@@ -1691,12 +1720,7 @@ impl<'a> Parser<'a> {
             // Handle macro_rules! foo!
             let span = self.prev_token.span;
             self.struct_span_err(span, "macro names aren't followed by a `!`")
-                .span_suggestion(
-                    span,
-                    "remove the `!`",
-                    "".to_owned(),
-                    Applicability::MachineApplicable,
-                )
+                .span_suggestion(span, "remove the `!`", "", Applicability::MachineApplicable)
                 .emit();
         }
 
@@ -1722,7 +1746,7 @@ impl<'a> Parser<'a> {
                 .span_suggestion(
                     vis.span,
                     "try exporting the macro",
-                    "#[macro_export]".to_owned(),
+                    "#[macro_export]",
                     Applicability::MaybeIncorrect, // speculative
                 )
                 .emit();
@@ -1731,7 +1755,7 @@ impl<'a> Parser<'a> {
                 .span_suggestion(
                     vis.span,
                     "remove the visibility",
-                    String::new(),
+                    "",
                     Applicability::MachineApplicable,
                 )
                 .help(&format!("try adjusting the macro to put `{vstr}` inside the invocation"))
@@ -1765,14 +1789,14 @@ impl<'a> Parser<'a> {
             err.span_suggestion(
                 span,
                 "change the delimiters to curly braces",
-                " { /* items */ }".to_string(),
+                " { /* items */ }",
                 Applicability::HasPlaceholders,
             );
         }
         err.span_suggestion(
             span.shrink_to_hi(),
             "add a semicolon",
-            ';'.to_string(),
+            ';',
             Applicability::MaybeIncorrect,
         );
         err.emit();
@@ -1797,7 +1821,7 @@ impl<'a> Parser<'a> {
             .span_suggestion(
                 item.unwrap().span,
                 &format!("consider creating a new `{kw_str}` definition instead of nesting"),
-                String::new(),
+                "",
                 Applicability::MaybeIncorrect,
             )
             .emit();
@@ -2057,7 +2081,7 @@ impl<'a> Parser<'a> {
                         err.span_suggestion(
                             self.token.uninterpolated_span(),
                             &format!("`{original_kw}` already used earlier, remove this one"),
-                            "".to_string(),
+                            "",
                             Applicability::MachineApplicable,
                         )
                         .span_note(original_sp, &format!("`{original_kw}` first seen here"));
@@ -2105,7 +2129,7 @@ impl<'a> Parser<'a> {
                                 err.span_suggestion(
                                     current_vis.span,
                                     "there is already a visibility modifier, remove one",
-                                    "".to_string(),
+                                    "",
                                     Applicability::MachineApplicable,
                                 )
                                 .span_note(orig_vis.span, "explicit visibility first seen here");
