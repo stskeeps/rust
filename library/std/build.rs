@@ -30,6 +30,8 @@ fn main() {
         || target.contains("espidf")
         || target.contains("solid")
         || target.contains("zkvm")
+	// Workaround for https://github.com/risc0/risc0/issues/116
+	|| target.contains("riscv32im")
     {
         // These platforms don't have any special requirements.
     } else {
