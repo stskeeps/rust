@@ -111,7 +111,6 @@ RUN sh /scripts/sccache.sh
 ENV PGO_HOST=x86_64-unknown-linux-gnu
 
 ENV HOSTS=x86_64-unknown-linux-gnu
-#      --enable-full-tools \
 #      --enable-sanitizers \
 #      --enable-profiler \
 #      --enable-compiler-docs \
@@ -123,11 +122,12 @@ ENV RUST_CONFIGURE_ARGS \
       --set llvm.ninja=false \
       --set rust.jemalloc \
       --disable-docs --disable-codegen-tests \
+      --enable-full-tools \
       --tools cargo,src
 
 # ENV SCRIPT ../src/ci/pgo.sh python3 ../x.py dist \
 ENV SCRIPT python3 ../x.py dist \
-    --host $HOSTS --target riscv32im-risc0-zkvm-elf,$HOSTS \
+    --host $HOSTS --target $HOSTS,riscv32im-risc0-zkvm-elf \
     rustc extended cargo rust-std
 #    --include-default-paths \
 #    build-manifest

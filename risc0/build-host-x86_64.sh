@@ -11,7 +11,6 @@ DATE=$1
 DOCKERS="dist-x86_64-linux"
 
 build() {
-    #    ./x.py dist build-manifest rustc rust-std cargo
     for docker in ${DOCKERS}
     do
         (cd .. &&
