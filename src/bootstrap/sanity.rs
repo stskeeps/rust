@@ -165,7 +165,6 @@ than building it.
 
     for host in &build.hosts {
         if !build.config.dry_run {
-            // DO NOT SUBMIT without seeing if we need this
             cmd_finder.must_have(build.cxx(*host).unwrap());
         }
     }

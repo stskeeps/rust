@@ -207,7 +207,6 @@ const EXTRA_CHECK_CFGS: &[(Option<Mode>, &'static str, Option<&[&'static str]>)]
         "target_arch",
         Some(&["asmjs", "spirv", "nvptx", "nvptx64", "le32", "xtensa"]),
     ),
-// REMOVE BEFORE MERGE    (Some(Mode::Std), "target_vendor", Some(&["risc0"])),
     /* Extra names used by dependencies */
     // FIXME: Used by rustfmt is their test but is invalid (neither cargo nor bootstrap ever set
     // this config) should probably by removed or use a allow attribute.
