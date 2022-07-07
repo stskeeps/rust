@@ -118,6 +118,7 @@ static TARGETS: &[&str] = &[
     "powerpc64le-unknown-linux-gnu",
     "riscv32i-unknown-none-elf",
     "riscv32im-unknown-none-elf",
+    "riscv32im-risc0-zkvm-elf",
     "riscv32imc-unknown-none-elf",
     "riscv32imac-unknown-none-elf",
     "riscv32gc-unknown-linux-gnu",
@@ -166,10 +167,10 @@ static TARGETS: &[&str] = &[
 ///
 /// The order here matters, more specific entries should be first.
 static DOCS_FALLBACK: &[(&str, &str)] = &[
-    ("-apple-", "x86_64-apple-darwin"),
-    ("aarch64", "aarch64-unknown-linux-gnu"),
-    ("arm-", "aarch64-unknown-linux-gnu"),
-    ("", "x86_64-unknown-linux-gnu"),
+//    ("-apple-", "x86_64-apple-darwin"),
+//    ("aarch64", "aarch64-unknown-linux-gnu"),
+//    ("arm-", "aarch64-unknown-linux-gnu"),
+//    ("", "x86_64-unknown-linux-gnu"),
 ];
 
 static MSI_INSTALLERS: &[&str] = &[
@@ -351,43 +352,14 @@ impl Builder {
 
     fn add_profiles_to(&mut self, manifest: &mut Manifest) {
         let mut profile = |name, pkgs| self.profile(name, &mut manifest.profiles, pkgs);
-        profile("minimal", &["rustc", "cargo", "rust-std", "rust-mingw"]);
-        profile(
-            "default",
-            &[
-                "rustc",
-                "cargo",
-                "rust-std",
-                "rust-mingw",
-                "rust-docs",
-                "rustfmt-preview",
-                "clippy-preview",
-            ],
-        );
-        profile(
-            "complete",
-            &[
-                "rustc",
-                "cargo",
-                "rust-std",
-                "rust-mingw",
-                "rust-docs",
-                "rustfmt-preview",
-                "clippy-preview",
-                "rls-preview",
-                "rust-analyzer-preview",
-                "rust-src",
-                "llvm-tools-preview",
-                "rust-analysis",
-                "miri-preview",
-            ],
-        );
-
+        profile("minimal", &["rustc", "cargo", "rust-std"]);
+        profile("default", &["rustc", "cargo", "rust-std"]);
+        profile("complete", &["rustc", "cargo", "rust-std"]);
         // The compiler libraries are not stable for end users, and they're also huge, so we only
         // `rustc-dev` for nightly users, and only in the "complete" profile. It's still possible
         // for users to install the additional component manually, if needed.
         if self.versions.channel() == "nightly" {
-            self.extend_profile("complete", &mut manifest.profiles, &["rustc-dev"]);
+//            self.extend_profile("complete", &mut manifest.profiles, &["rustc-dev"]);
             // Do not include the rustc-docs component for now, as it causes
             // conflicts with the rust-docs component when installed. See
             // #75833.
