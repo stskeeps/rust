@@ -127,7 +127,7 @@ ENV RUST_CONFIGURE_ARGS \
 
 # ENV SCRIPT ../src/ci/pgo.sh python3 ../x.py dist \
 ENV SCRIPT python3 ../x.py dist \
-    --host $HOSTS --target riscv32im-risc0-zkvm-elf \
+    --host $HOSTS --target riscv32im-risc0-zkvm-elf,$HOSTS \
     rustc extended cargo rust-std
 #    --include-default-paths \
 #    build-manifest
