@@ -206,7 +206,7 @@ const EXTRA_CHECK_CFGS: &[(Option<Mode>, &'static str, Option<&[&'static str]>)]
     (Some(Mode::Std), "backtrace_in_libstd", None),
     /* Extra values not defined in the built-in targets yet, but used in std */
     (Some(Mode::Std), "target_env", Some(&["libnx"])),
-    (Some(Mode::Std), "target_os", Some(&["watchos"])),
+    (Some(Mode::Std), "target_os", Some(&["watchos", "zkvm"])),
     (
         Some(Mode::Std),
         "target_arch",
@@ -742,6 +742,10 @@ impl Build {
         }
         if self.config.profiler_enabled(target) {
             features.push_str(" profiler");
+        }
+        // risc0: Generate memcpy, etc.
+        if target.contains("zkvm") {
+            features.push_str(" compiler-builtins-mem");
         }
         features
     }

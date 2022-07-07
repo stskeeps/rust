@@ -111,22 +111,27 @@ RUN sh /scripts/sccache.sh
 ENV PGO_HOST=x86_64-unknown-linux-gnu
 
 ENV HOSTS=x86_64-unknown-linux-gnu
-
+#      --enable-sanitizers \
+#      --enable-profiler \
+#      --enable-compiler-docs \
 ENV RUST_CONFIGURE_ARGS \
-      --enable-full-tools \
-      --enable-sanitizers \
-      --enable-profiler \
-      --enable-compiler-docs \
       --set target.x86_64-unknown-linux-gnu.linker=clang \
       --set target.x86_64-unknown-linux-gnu.ar=/rustroot/bin/llvm-ar \
       --set target.x86_64-unknown-linux-gnu.ranlib=/rustroot/bin/llvm-ranlib \
       --set llvm.thin-lto=true \
       --set llvm.ninja=false \
-      --set rust.jemalloc
-ENV SCRIPT ../src/ci/pgo.sh python3 ../x.py dist \
-    --host $HOSTS --target $HOSTS \
-    --include-default-paths \
-    build-manifest
+      --set rust.jemalloc \
+      --disable-docs  \
+      --enable-full-tools \
+      --tools cargo,src
+
+# ENV SCRIPT ../src/ci/pgo.sh python3 ../x.py dist \
+ENV SCRIPT python3 ../x.py dist \
+    --host $HOSTS --target $HOSTS,riscv32im-risc0-zkvm-elf
+#    rustc extended cargo rust-std
+#    --include-default-paths \
+#    build-manifest
+#     rustc
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang
 
 # This is the only builder which will create source tarballs

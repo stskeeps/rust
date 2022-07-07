@@ -209,7 +209,7 @@
 #![allow(explicit_outlives_requirements)]
 #![allow(unused_lifetimes)]
 // Tell the compiler to link to either panic_abort or panic_unwind
-#![needs_panic_runtime]
+#![cfg_attr(not(target_vendor = "risc0"), needs_panic_runtime)]
 // std may use features in a platform-specific way
 #![allow(unused_features)]
 #![cfg_attr(test, feature(internal_output_capture, print_internals, update_panic_count))]
@@ -246,7 +246,7 @@
 #![feature(linkage)]
 #![feature(min_specialization)]
 #![feature(must_not_suspend)]
-#![feature(needs_panic_runtime)]
+#![cfg_attr(not(target_os = "zkvm"), feature(needs_panic_runtime))]
 #![feature(negative_impls)]
 #![feature(never_type)]
 #![cfg_attr(bootstrap, feature(nll))]
