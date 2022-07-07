@@ -752,6 +752,10 @@ impl Build {
         if self.config.profiler_enabled(target) {
             features.push_str(" profiler");
         }
+        // risc0: Generate memcpy, etc.
+        if target.contains("zkvm") {
+            features.push_str(" compiler-builtins-mem");
+        }
         features
     }
 
