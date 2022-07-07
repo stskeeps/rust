@@ -141,4 +141,4 @@ ENV DIST_SRC 1
 # libcurl, instead it should compile its own.
 ENV LIBCURL_NO_PKG_CONFIG 1
 
-#ENV DIST_REQUIRE_ALL_TOOLS 1
+ENV DIST_REQUIRE_ALL_TOOLS 1
