@@ -1,6 +1,9 @@
 use crate::io;
 
-use risc0_zkvm_platform::io::{host_sendrecv, SENDRECV_CHANNEL_STDERR, SENDRECV_CHANNEL_STDOUT};
+use risc0_zkvm_platform::{
+    io::{SENDRECV_CHANNEL_STDERR, SENDRECV_CHANNEL_STDOUT},
+    rt::host_sendrecv,
+};
 
 pub struct Stdin;
 pub struct Stdout;
