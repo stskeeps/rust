@@ -278,6 +278,7 @@ target | std | host | notes
 `powerpc64le-unknown-linux-musl` | ? |  |
 `riscv32gc-unknown-linux-gnu` |   |   | RISC-V Linux (kernel 5.4, glibc 2.33)
 `riscv32gc-unknown-linux-musl` |   |   | RISC-V Linux (kernel 5.4, musl + RISCV32 support patches)
+`riscv32im-risc0-zkvm-elf` | * |  | Risc-V running on the Risc0 Zero-Knowledge Virtual Machine
 `riscv32im-unknown-none-elf` | * |  | Bare RISC-V (RV32IM ISA)
 [`riscv32imac-unknown-xous-elf`](platform-support/riscv32imac-unknown-xous-elf.md) | ? |  | RISC-V Xous (RV32IMAC ISA)
 `riscv32imc-esp-espidf` | ✓ |  | RISC-V ESP-IDF

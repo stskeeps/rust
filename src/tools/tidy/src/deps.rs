@@ -11,6 +11,7 @@ const LICENSES: &[&str] = &[
     "MIT / Apache-2.0",
     "Apache-2.0/MIT",
     "Apache-2.0 / MIT",
+    "Apache-2.0",
     "MIT OR Apache-2.0",
     "Apache-2.0 OR MIT",
     "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT", // wasi license
@@ -190,6 +191,7 @@ const PERMITTED_DEPENDENCIES: &[&str] = &[
     "regex-automata",
     "regex-syntax",
     "remove_dir_all",
+    "risc0-zkvm-platform",
     "rls-data",
     "rls-span",
     "rustc-demangle",
