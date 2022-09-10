@@ -2,7 +2,7 @@ use crate::io;
 
 use risc0_zkvm_platform::{
     io::{SENDRECV_CHANNEL_STDERR, SENDRECV_CHANNEL_STDOUT},
-    rt::host_sendrecv,
+    rt::host_io::host_sendrecv,
 };
 
 pub struct Stdin;
